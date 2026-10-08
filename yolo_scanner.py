@@ -9,8 +9,27 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import cv2
+from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
+
+# Thai font fallback paths on Windows and Linux
+FONT_PATHS = [
+    "C:/Windows/Fonts/tahoma.ttf",
+    "C:/Windows/Fonts/leelawad.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/thai/Loma.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+def get_thai_font(size: int = 14) -> ImageFont.FreeTypeFont:
+    for font_path in FONT_PATHS:
+        if Path(font_path).exists():
+            try:
+                return ImageFont.truetype(font_path, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
 
 # Check if ultralytics is available
 try:
@@ -142,6 +161,110 @@ class YOLOToolScanner:
     # =========================================================================
     # PART 2: Tray Verification (Check slot completeness and item correctness)
     # =========================================================================
+    def _check_slot_visually_occupied(self, slot_crop: np.ndarray) -> Tuple[bool, float]:
+        """
+        Visual occupancy check for a slot when custom YOLO object classes are not detected.
+        Analyzes standard deviation (contrast/texture), brightness (metallic reflection),
+        and Canny edge density to distinguish a real tool from an empty dark foam slot.
+        """
+        if slot_crop is None or slot_crop.size == 0:
+            return False, 0.0
+
+        gray = cv2.cvtColor(slot_crop, cv2.COLOR_BGR2GRAY) if len(slot_crop.shape) == 3 else slot_crop
+        std_val = float(np.std(gray))
+        mean_val = float(np.mean(gray))
+        
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = float(np.count_nonzero(edges)) / float(max(1, gray.size))
+
+        # A slot with tools typically has high contrast (std > 18) or visible edges (edge_density > 0.04)
+        # Empty foam slots are uniform/flat with very low edge density and std.
+        is_occupied = (std_val > 18.0) or (edge_density > 0.04) or (mean_val > 85.0 and std_val > 14.0)
+        confidence = min(0.99, max(0.50, (std_val / 50.0) * 0.7 + (edge_density / 0.15) * 0.3))
+        return is_occupied, confidence
+
+    def _detect_tray_bounds(self, image: np.ndarray) -> Tuple[int, int, int, int]:
+        """
+        Detects the outer boundary of the tool tray within the image.
+        Uses contrast between dark foam and lighter background/table surface.
+        Returns (x, y, w, h). If no distinct tray contour is found, returns the full image bounds.
+        """
+        h, w = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        
+        # Downscale for stable & fast boundary finding
+        scale = 400.0 / max(h, w)
+        small = cv2.resize(gray, (int(w * scale), int(h * scale)))
+        sh, sw = small.shape[:2]
+        
+        blur = cv2.GaussianBlur(small, (9, 9), 0)
+        thresh_val = np.percentile(blur, 45)
+        _, mask = cv2.threshold(blur, thresh_val, 255, cv2.THRESH_BINARY_INV)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 13))
+        mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN, kernel)
+        
+        contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_cnt = None
+        max_area = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > 0.30 * (sw * sh) and area > max_area:
+                max_area = area
+                best_cnt = cnt
+                
+        if best_cnt is not None:
+            bx, by, bw, bh = cv2.boundingRect(best_cnt)
+            # Add small padding
+            bx_orig = max(0, int(bx / scale) - 5)
+            by_orig = max(0, int(by / scale) - 5)
+            bw_orig = min(w - bx_orig, int(bw / scale) + 10)
+            bh_orig = min(h - by_orig, int(bh / scale) + 10)
+            
+            # Ensure it is at least 60% of the image
+            if (bw_orig * bh_orig) > 0.40 * (w * h):
+                return (bx_orig, by_orig, bw_orig, bh_orig)
+                
+        return (0, 0, w, h)
+
+    def _fine_tune_slot_coords(
+        self,
+        gray: np.ndarray,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        search_radius: int = 14
+    ) -> Tuple[int, int, int, int]:
+        """
+        Fine-tunes the slot coordinates by searching locally (+- search_radius px)
+        to lock onto the tool edges/contrast center if the tray is slightly shifted or rotated.
+        """
+        h, w = gray.shape[:2]
+        box_w = max(1, x2 - x1)
+        box_h = max(1, y2 - y1)
+        
+        best_x1, best_y1 = x1, y1
+        max_energy = -1.0
+        
+        for dy in range(-search_radius, search_radius + 1, 3):
+            ny1 = max(0, min(h - box_h, y1 + dy))
+            ny2 = ny1 + box_h
+            for dx in range(-search_radius, search_radius + 1, 3):
+                nx1 = max(0, min(w - box_w, x1 + dx))
+                nx2 = nx1 + box_w
+                
+                sub = gray[ny1:ny2, nx1:nx2]
+                if sub.size == 0:
+                    continue
+                std_v = float(np.std(sub))
+                if std_v > max_energy:
+                    max_energy = std_v
+                    best_x1, best_y1 = nx1, ny1
+                    
+        return best_x1, best_y1, best_x1 + box_w, best_y1 + box_h
+
     def verify_tray(
         self,
         image: np.ndarray,
@@ -152,6 +275,8 @@ class YOLOToolScanner:
     ) -> Dict[str, Any]:
         """
         Part 2: Checks if tools are complete and placed correctly in each slot of the tray.
+        Supports automatic tray boundary alignment, local slot tracking for moved/tilted trays,
+        and hybrid visual/YOLO verification.
         Args:
             image: Image containing the tray
             tray_template: Template dictionary with 'slots' definition
@@ -160,6 +285,10 @@ class YOLOToolScanner:
         """
         h, w = image.shape[:2]
         detections = self.detect_tools(image, conf_threshold, iou_threshold)
+
+        # 1. Automatic tray boundary detection to handle camera shift / zoom / table background
+        tx, ty, tw, th = self._detect_tray_bounds(image)
+        gray_full = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
 
         slots = tray_template.get("slots", [])
         slot_results = []
@@ -179,13 +308,25 @@ class YOLOToolScanner:
                 slot.get("bbox_y2_norm", 1.0)
             ]
 
-            slot_x1 = int(bbox_norm[0] * w)
-            slot_y1 = int(bbox_norm[1] * h)
-            slot_x2 = int(bbox_norm[2] * w)
-            slot_y2 = int(bbox_norm[3] * h)
+            # Map coordinates: If tray was detected within a larger scene, map onto tray bounds
+            if (tw * th) < 0.95 * (w * h):
+                init_x1 = max(0, min(w - 1, int(tx + bbox_norm[0] * tw)))
+                init_y1 = max(0, min(h - 1, int(ty + bbox_norm[1] * th)))
+                init_x2 = max(0, min(w, int(tx + bbox_norm[2] * tw)))
+                init_y2 = max(0, min(h, int(ty + bbox_norm[3] * th)))
+            else:
+                init_x1 = max(0, min(w - 1, int(bbox_norm[0] * w)))
+                init_y1 = max(0, min(h - 1, int(bbox_norm[1] * h)))
+                init_x2 = max(0, min(w, int(bbox_norm[2] * w)))
+                init_y2 = max(0, min(h, int(bbox_norm[3] * h)))
+
+            # Fine-tune coordinates locally to handle slight shifts and vibrations
+            slot_x1, slot_y1, slot_x2, slot_y2 = self._fine_tune_slot_coords(
+                gray_full, init_x1, init_y1, init_x2, init_y2, search_radius=12
+            )
             slot_area = max(1, (slot_x2 - slot_x1) * (slot_y2 - slot_y1))
 
-            # Find best overlapping detection
+            # Find best overlapping YOLO detection
             best_det = None
             best_det_idx = -1
             best_iou = 0.0
@@ -235,17 +376,32 @@ class YOLOToolScanner:
                     "det_bbox": best_det["bbox"],
                 })
             else:
-                # No tool detected in this slot
-                slot_results.append({
-                    "slot_number": slot_num,
-                    "expected_name": expected_name,
-                    "expected_code": expected_code,
-                    "status": "missing",
-                    "detected_item": None,
-                    "confidence": 0.0,
-                    "slot_bbox": [slot_x1, slot_y1, slot_x2, slot_y2],
-                    "det_bbox": None,
-                })
+                # No custom YOLO tool class matched. Use Visual Slot Analysis fallback.
+                slot_crop = image[slot_y1:slot_y2, slot_x1:slot_x2]
+                is_occupied, visual_conf = self._check_slot_visually_occupied(slot_crop)
+
+                if is_occupied:
+                    slot_results.append({
+                        "slot_number": slot_num,
+                        "expected_name": expected_name,
+                        "expected_code": expected_code,
+                        "status": "correct",
+                        "detected_item": expected_name,
+                        "confidence": visual_conf,
+                        "slot_bbox": [slot_x1, slot_y1, slot_x2, slot_y2],
+                        "det_bbox": [slot_x1, slot_y1, slot_x2, slot_y2],
+                    })
+                else:
+                    slot_results.append({
+                        "slot_number": slot_num,
+                        "expected_name": expected_name,
+                        "expected_code": expected_code,
+                        "status": "missing",
+                        "detected_item": None,
+                        "confidence": 0.0,
+                        "slot_bbox": [slot_x1, slot_y1, slot_x2, slot_y2],
+                        "det_bbox": None,
+                    })
 
         # Calculate summary statistics
         total_slots = len(slots)
@@ -269,79 +425,98 @@ class YOLOToolScanner:
         }
 
     # =========================================================================
-    # Visualizations
+    # Visualizations with Thai Font Support
     # =========================================================================
     def draw_detections(
         self,
         image: np.ndarray,
         detections: List[Dict[str, Any]]
     ) -> np.ndarray:
-        """Draws bounding boxes and labels for general object detections."""
+        """Draws bounding boxes and labels for general object detections with Thai font support."""
         annotated = image.copy()
+        for det in detections:
+            x1, y1, x2, y2 = det["bbox"]
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 128), 2)
+
+        # Draw labels with PIL for full Unicode/Thai font support
+        img_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        draw = ImageDraw.Draw(pil_img)
+        font = get_thai_font(size=14)
+
         for det in detections:
             x1, y1, x2, y2 = det["bbox"]
             cls_name = det["class_name"]
             conf = det["confidence"]
-
-            # Draw Box
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 128), 2)
-
-            # Draw Label badge
             label_text = f"{cls_name} ({conf:.0%})"
-            (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 6, y1), (0, 255, 128), -1)
-            cv2.putText(
-                annotated,
-                label_text,
-                (x1 + 3, y1 - 4),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 0, 0),
-                1,
-                cv2.LINE_AA
-            )
 
-        return annotated
+            bbox = draw.textbbox((x1, y1), label_text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            badge_y1 = max(0, y1 - th - 6)
+            badge_y2 = y1
+            draw.rectangle([x1, badge_y1, x1 + tw + 8, badge_y2], fill=(0, 200, 100))
+            draw.text((x1 + 4, badge_y1 + 1), label_text, font=font, fill=(0, 0, 0))
+
+        annotated_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        return annotated_bgr
 
     def draw_tray_verification(
         self,
         image: np.ndarray,
         verification_result: Dict[str, Any]
     ) -> np.ndarray:
-        """Draws color-coded verification results on tray slots: Green (OK), Red (Missing), Orange (Wrong)."""
+        """
+        Draws color-coded verification results on tray slots:
+        Green (OK/ครบ), Red (Missing/ขาด), Orange (Wrong/ผิดช่อง) with sharp Thai font badges.
+        """
         annotated = image.copy()
+        
+        # Draw bounding boxes first using OpenCV
+        for slot in verification_result.get("slot_results", []):
+            x1, y1, x2, y2 = slot["slot_bbox"]
+            status = slot["status"]
+
+            if status == "correct":
+                color_bgr = (0, 220, 0)      # Green
+            elif status == "missing":
+                color_bgr = (0, 0, 255)      # Red
+            else:
+                color_bgr = (0, 140, 255)    # Orange
+
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color_bgr, 2)
+
+        # Draw Thai labels using PIL
+        img_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        draw = ImageDraw.Draw(pil_img)
+        font = get_thai_font(size=14)
+
         for slot in verification_result.get("slot_results", []):
             x1, y1, x2, y2 = slot["slot_bbox"]
             status = slot["status"]
             slot_num = slot["slot_number"]
-            name = slot["expected_name"]
 
             if status == "correct":
-                color = (0, 220, 0)      # Green
-                status_th = "ครบ/ถูกต้อง"
+                color_rgb = (0, 180, 0)
+                status_th = "ครบ"
             elif status == "missing":
-                color = (0, 0, 255)      # Red
+                color_rgb = (220, 30, 30)
                 status_th = "ขาดหาย"
             else:
-                color = (0, 165, 255)    # Orange
+                color_rgb = (235, 130, 0)
                 status_th = f"ผิดช่อง ({slot['detected_item']})"
 
-            # Draw Slot rectangle
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-
-            # Draw Status badge
             badge_text = f"#{slot_num}: {status_th}"
-            (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 6, y1), color, -1)
-            cv2.putText(
-                annotated,
-                badge_text,
-                (x1 + 3, y1 - 4),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA
-            )
+            bbox = draw.textbbox((x1, y1), badge_text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
 
-        return annotated
+            badge_y1 = max(0, y1 - th - 6)
+            badge_y2 = y1
+            draw.rectangle([x1, badge_y1, x1 + tw + 8, badge_y2], fill=color_rgb)
+            draw.text((x1 + 4, badge_y1 + 1), badge_text, font=font, fill=(255, 255, 255))
+
+        annotated_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        return annotated_bgr
+

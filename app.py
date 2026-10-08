@@ -1022,10 +1022,10 @@ def render_tray_register():
                                 </span>
                                 <span style="background:#E5E5E5;color:#525252;font-size:0.72rem;
                                              padding:1px 6px;border-radius:8px;">
-                                    {slot['category']}
+                                    {slot.get('category', 'เครื่องมือ')}
                                 </span>
                                 <span style="color:#C7C7C7;font-size:0.70rem;margin-left:auto;">
-                                    \u2609 {slot['mean_brightness']:.0f}
+                                    ☉ {slot.get('mean_brightness', 110.0):.0f}
                                 </span>
                             </div>
                             """, unsafe_allow_html=True)

@@ -10,25 +10,34 @@ from db import get_db
 from models_db import ToolClass, ImageLabel
 
 
-def import_classes_from_legacy_data():
-    """Imports tool classes from existing mock_database/data.json if available."""
-    json_path = Path("mock_database/data.json")
-    if not json_path.exists():
-        st.error("ไม่พบไฟล์ mock_database/data.json")
-        return 0
+def import_classes_from_legacy_data(custom_data=None):
+    """Imports tool classes from existing mock_database/data.json or passed data."""
+    if custom_data is None:
+        json_path = Path("mock_database/data.json")
+        if not json_path.exists():
+            st.error("ไม่พบไฟล์ mock_database/data.json")
+            return 0
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ JSON: {e}")
+            return 0
+    else:
+        data = custom_data
 
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        
         imported_count = 0
         with get_db() as db:
             for item in data:
                 code = item.get("code", "").strip()
-                name_th = item.get("name", "").strip()
+                name_th = (item.get("name") or item.get("name_th") or code).strip()
+                name_en = (item.get("name_en") or code).strip()
+                category = item.get("category", "Special Tools").strip()
+                desc = item.get("description", f"Auto-imported (Code: {code})").strip()
                 if not code:
                     continue
-                
+
                 # Check if already exists
                 existing = db.query(ToolClass).filter(
                     (ToolClass.class_key == code) | (ToolClass.name_th == name_th)
@@ -37,17 +46,19 @@ def import_classes_from_legacy_data():
                 if not existing:
                     new_class = ToolClass(
                         class_key=code,
-                        name_en=code,
+                        name_en=name_en,
                         name_th=name_th,
-                        category="Hand Tools",
-                        description=f"Auto-imported from mock_database (Code: {code})",
+                        category=category,
+                        description=desc,
                         is_active=True
                     )
                     db.add(new_class)
                     imported_count += 1
-        
+
         return imported_count
     except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดในการนำเข้าข้อมูล: {e}")
+        return 0
         st.error(f"เกิดข้อผิดพลาดในการนำเข้าข้อมูล: {e}")
         return 0
 
@@ -172,12 +183,33 @@ def render_class_manager():
 
     # TAB 3: Import from Legacy Data
     with tab_import:
-        st.markdown("#### 📥 นำเข้ารายการเครื่องมือจากระบบเดิม (mock_database/data.json)")
-        st.write("ระบบจะแปลงรายการอุปกรณ์เดิม 30+ รายการ เข้าสู่ตาราง `tool_classes` ใน PostgreSQL อัตโนมัติ")
-        if st.button("🚀 เริ่มนำเข้าข้อมูลเดิม", use_container_width=True):
-            count = import_classes_from_legacy_data()
-            if count > 0:
-                st.success(f"นำเข้าข้อมูลสำเร็จทั้งหมด {count} รายการ!")
-                st.rerun()
-            else:
-                st.info("ไม่มีรายการใหม่ที่ต้องนำเข้า (อาจมีครบแล้ว)")
+        st.markdown("#### 📥 นำเข้ารายการเครื่องมือ (Import Classes)")
+        st.write("ระบบจะแปลงรายการอุปกรณ์ 31 รายการจาก `mock_database/data.json` หรือจากไฟล์ JSON ที่อัปโหลด เข้าสู่ตาราง `tool_classes` ใน PostgreSQL อัตโนมัติ")
+        
+        col_def, col_up = st.columns(2)
+        with col_def:
+            st.markdown("##### ⚡ นำเข้าจากไฟล์ค่าเริ่มต้น")
+            st.caption("อ่านไฟล์ `mock_database/data.json` ที่ระบบเตรียมไว้ (31 รายการเครื่องมือพิเศษ)")
+            if st.button("🚀 เริ่มนำเข้าจาก data.json (31 รายการ)", use_container_width=True):
+                count = import_classes_from_legacy_data()
+                if count > 0:
+                    st.success(f"นำเข้าข้อมูลสำเร็จทั้งหมด {count} รายการ!")
+                    st.rerun()
+                else:
+                    st.info("ไม่มีรายการใหม่ที่ต้องนำเข้า (มีครบแล้วในระบบ)")
+
+        with col_up:
+            st.markdown("##### 📁 อัปโหลดไฟล์ JSON กำหนดเอง")
+            uploaded_json = st.file_uploader("เลือกไฟล์ JSON ที่มีรายการคลาส", type=["json"], key="upload_custom_class_json")
+            if uploaded_json is not None:
+                if st.button("📥 นำเข้าจากไฟล์ที่อัปโหลด", use_container_width=True):
+                    try:
+                        content = json.loads(uploaded_json.getvalue().decode("utf-8"))
+                        count = import_classes_from_legacy_data(custom_data=content)
+                        if count > 0:
+                            st.success(f"นำเข้าจากไฟล์อัปโหลดสำเร็จ {count} รายการ!")
+                            st.rerun()
+                        else:
+                            st.info("ไม่มีรายการใหม่ที่ต้องนำเข้า")
+                    except Exception as e:
+                        st.error(f"รูปแบบไฟล์ JSON ไม่ถูกต้อง: {e}")

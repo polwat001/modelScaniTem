@@ -11,20 +11,28 @@ from db import get_db
 from models_db import TrayTemplate, TraySlot, ToolClass
 
 
-def import_existing_json_trays():
-    """Imports existing tray JSON files from mock_database/tray_templates into PostgreSQL."""
-    templates_dir = Path("mock_database/tray_templates")
-    if not templates_dir.exists():
-        return 0
-
-    count = 0
-    with get_db() as db:
+def import_existing_json_trays(custom_json_data=None):
+    """Imports existing tray JSON files from mock_database/tray_templates or custom dict into PostgreSQL."""
+    data_list = []
+    if custom_json_data is not None:
+        data_list = [(custom_json_data, "uploaded_file.json")]
+    else:
+        templates_dir = Path("mock_database/tray_templates")
+        if not templates_dir.exists():
+            return 0
         for json_file in templates_dir.glob("*.json"):
             try:
                 with open(json_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    data_list.append((data, json_file.name))
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการอ่าน {json_file.name}: {e}")
 
-                tray_id = data.get("tray_id") or json_file.stem
+    count = 0
+    with get_db() as db:
+        for data, filename in data_list:
+            try:
+                tray_id = data.get("tray_id") or Path(filename).stem
                 tray_name = data.get("tray_name", tray_id)
                 image_size = data.get("image_size", [1920, 1080])
 
@@ -34,7 +42,7 @@ def import_existing_json_trays():
                     template = TrayTemplate(
                         tray_id=tray_id,
                         tray_name=tray_name,
-                        description=f"Imported from {json_file.name}",
+                        description=data.get("description", f"Imported from {filename}"),
                         image_width=image_size[0] if len(image_size) > 0 else 1920,
                         image_height=image_size[1] if len(image_size) > 1 else 1080,
                         is_active=True
@@ -53,21 +61,21 @@ def import_existing_json_trays():
 
                         slot_obj = TraySlot(
                             tray_template_id=template.id,
-                            slot_number=idx + 1,
+                            slot_number=s.get("slot_number", idx + 1),
                             item_name=s.get("name", f"Slot {idx + 1}"),
-                            item_code=s.get("filename", "").replace(".jpg", "").replace(".png", ""),
+                            item_code=s.get("filename", "").replace(".jpg", "").replace(".png", "") or s.get("code", ""),
                             bbox_x1_norm=float(x1),
                             bbox_y1_norm=float(y1),
                             bbox_x2_norm=float(x2),
                             bbox_y2_norm=float(y2),
-                            is_required=True
+                            is_required=s.get("is_required", True)
                         )
                         db.add(slot_obj)
 
                     template.slot_count = len(slots)
                     count += 1
             except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการอ่าน {json_file.name}: {e}")
+                st.error(f"เกิดข้อผิดพลาดในการนำเข้า {filename}: {e}")
 
     return count
 
@@ -165,11 +173,33 @@ def render_tray_manager(current_user: dict):
 
     # TAB 3: Import from JSON
     with tab_import:
-        st.markdown("#### 📥 นำเข้าแม่แบบถาดเดิมจากโฟลเดอร์ mock_database/tray_templates")
-        if st.button("🚀 นำเข้าแม่แบบถาดเดิมทั้งหมด", use_container_width=True):
-            imported = import_existing_json_trays()
-            if imported > 0:
-                st.success(f"นำเข้าถาดเดิมสำเร็จ {imported} แบบ!")
-                st.rerun()
-            else:
-                st.info("ไม่มีถาดใหม่ที่ต้องนำเข้า หรือนำเข้าไว้แล้ว")
+        st.markdown("#### 📥 นำเข้าแม่แบบถาด (Import Tray Templates)")
+        st.write("นำเข้าแม่แบบถาดจากโฟลเดอร์ `mock_database/tray_templates` หรืออัปโหลดไฟล์ JSON ถาดเครื่องมือใหม่")
+
+        col_t_def, col_t_up = st.columns(2)
+        with col_t_def:
+            st.markdown("##### ⚡ นำเข้าจากโฟลเดอร์ระบบ")
+            st.caption("ระบบพบแม่แบบ เช่น `tray_special_tools_31.json` (31 ช่อง)")
+            if st.button("🚀 นำเข้าแม่แบบถาดทั้งหมดจากโฟลเดอร์", use_container_width=True):
+                imported = import_existing_json_trays()
+                if imported > 0:
+                    st.success(f"นำเข้าถาดสำเร็จ {imported} แบบ!")
+                    st.rerun()
+                else:
+                    st.info("ไม่มีถาดใหม่ที่ต้องนำเข้า (หรือนำเข้าไว้แล้ว)")
+
+        with col_t_up:
+            st.markdown("##### 📁 อัปโหลดไฟล์ Template JSON")
+            uploaded_tray = st.file_uploader("เลือกไฟล์ JSON แม่แบบถาด", type=["json"], key="upload_custom_tray_json")
+            if uploaded_tray is not None:
+                if st.button("📥 นำเข้าถาดจากไฟล์ที่อัปโหลด", use_container_width=True):
+                    try:
+                        content = json.loads(uploaded_tray.getvalue().decode("utf-8"))
+                        imported = import_existing_json_trays(custom_json_data=content)
+                        if imported > 0:
+                            st.success(f"นำเข้าถาดจากไฟล์อัปโหลดสำเร็จ!")
+                            st.rerun()
+                        else:
+                            st.info("ถาดนี้มีอยู่ในระบบแล้ว")
+                    except Exception as e:
+                        st.error(f"รูปแบบไฟล์ JSON ไม่ถูกต้อง: {e}")

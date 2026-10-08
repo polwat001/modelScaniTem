@@ -479,7 +479,7 @@ class ShapeScanner:
 
     def check_tray_slots(self, scene_img, tray_id, brightness_threshold_pct=18):
         """
-        ตรวจสอบว่าถาดมีเครื่องมือครบตาม Template โดยใช้ Region Comparison (Brightness)
+        ตรวจสอบว่าถาดมีเครื่องมือครบตาม Template โดยใช้ Region Comparison (Brightness / Visual)
 
         Args:
             scene_img                : ภาพถาดปัจจุบัน BGR
@@ -489,19 +489,41 @@ class ShapeScanner:
         Returns:
             Tuple: (List[dict] results, dict tray_data) หรือ (None, error_msg)
         """
-        template_path = os.path.join(self.db_folder, 'tray_templates', f"{tray_id}.json")
-        if not os.path.exists(template_path):
-            return None, f"ไม่พบ Template: {tray_id}"
+        template_dir = os.path.join(self.db_folder, 'tray_templates')
+        template_path = os.path.join(template_dir, f"{tray_id}.json")
+        tray_data = None
 
-        with open(template_path, 'r', encoding='utf-8') as f:
-            tray_data = json.load(f)
+        if os.path.exists(template_path):
+            with open(template_path, 'r', encoding='utf-8') as f:
+                tray_data = json.load(f)
+        else:
+            # ค้นหาจากไฟล์ทั้งหมดในโฟลเดอร์ template_dir กรณีชื่อไฟล์ไม่ตรงกับ tray_id
+            if os.path.exists(template_dir):
+                for fname in os.listdir(template_dir):
+                    if fname.endswith('.json'):
+                        p = os.path.join(template_dir, fname)
+                        try:
+                            with open(p, 'r', encoding='utf-8') as f:
+                                d = json.load(f)
+                            if d.get('tray_id') == tray_id:
+                                tray_data = d
+                                break
+                        except Exception:
+                            continue
+
+        if tray_data is None:
+            return None, f"ไม่พบ Template: {tray_id}"
 
         gray_scene = cv2.cvtColor(scene_img, cv2.COLOR_BGR2GRAY)
         h_scene, w_scene = gray_scene.shape
 
         results = []
-        for slot in tray_data['slots']:
-            x1_n, y1_n, x2_n, y2_n = slot['bbox_norm']
+        for slot in tray_data.get('slots', []):
+            bbox_norm = slot.get('bbox_norm')
+            if not bbox_norm:
+                continue
+
+            x1_n, y1_n, x2_n, y2_n = bbox_norm
 
             # Denormalize + padding 1% เพื่อความยืดหยุ่น
             pad_x = w_scene * 0.01
@@ -515,13 +537,23 @@ class ShapeScanner:
 
             if crop.size == 0:
                 status       = "unknown"
-                current_b    = slot['mean_brightness']
+                current_b    = slot.get('mean_brightness', 128.0)
                 diff_pct     = 0.0
             else:
                 current_b = float(np.mean(crop))
-                baseline  = slot['mean_brightness']
-                diff_pct  = abs(current_b - baseline) / max(baseline, 1.0) * 100
-                status    = "missing" if diff_pct > brightness_threshold_pct else "present"
+                # ถ้ามี mean_brightness baseline ให้เทียบ diff
+                if 'mean_brightness' in slot and slot['mean_brightness'] is not None:
+                    baseline  = slot['mean_brightness']
+                    diff_pct  = abs(current_b - baseline) / max(baseline, 1.0) * 100
+                    status    = "missing" if diff_pct > brightness_threshold_pct else "present"
+                else:
+                    # ถ้าไม่มี baseline ใช้ contrast & edge density เช็คการมีอยู่
+                    std_val = float(np.std(crop))
+                    edges = cv2.Canny(crop, 50, 150)
+                    edge_density = float(np.count_nonzero(edges)) / float(max(1, crop.size))
+                    is_present = (std_val > 18.0) or (edge_density > 0.04) or (current_b > 85.0 and std_val > 14.0)
+                    status = "present" if is_present else "missing"
+                    diff_pct = 0.0 if is_present else 100.0
 
             results.append({
                 **slot,
