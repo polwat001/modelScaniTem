@@ -13,6 +13,7 @@ from config import MODELS_DIR
 from db import get_db
 from models_db import TrainedModel, TrayTemplate
 from yolo_scanner import YOLOToolScanner, ULTRALYTICS_AVAILABLE
+from admin_modules.image_collector import decode_image_file
 
 
 def load_active_scanner() -> tuple[YOLOToolScanner, str]:
@@ -72,15 +73,18 @@ def render_scanner_tester():
         with c_file:
             uploaded_img = st.file_uploader(
                 "อัปโหลดภาพสำหรับสแกน",
-                type=["jpg", "jpeg", "png", "webp"],
+                type=["jpg", "jpeg", "png", "webp", "bmp", "cr2"],
                 key="test_obj_upload"
             )
         with c_conf:
             conf_th = st.slider("เกณฑ์ความมั่นใจ (Confidence Threshold)", 0.10, 0.95, 0.35, 0.05)
 
         if uploaded_img:
-            # Read image as OpenCV format (BGR)
-            pil_img = Image.open(uploaded_img).convert("RGB")
+            # Read image (supports CR2, BMP, WEBP, PNG, JPG)
+            ext = Path(uploaded_img.name).suffix.lower()
+            pil_img, _ = decode_image_file(uploaded_img.getvalue(), ext)
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
             img_np = np.array(pil_img)
             img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
@@ -145,12 +149,15 @@ def render_scanner_tester():
         with c_tray_img:
             uploaded_tray_img = st.file_uploader(
                 "อัปโหลดภาพถ่ายถาดที่ต้องการตรวจสอบ",
-                type=["jpg", "jpeg", "png", "webp"],
+                type=["jpg", "jpeg", "png", "webp", "bmp", "cr2"],
                 key="test_tray_upload"
             )
 
         if uploaded_tray_img:
-            pil_img = Image.open(uploaded_tray_img).convert("RGB")
+            ext = Path(uploaded_tray_img.name).suffix.lower()
+            pil_img, _ = decode_image_file(uploaded_tray_img.getvalue(), ext)
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
             img_np = np.array(pil_img)
             img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 

@@ -59,11 +59,18 @@ def import_existing_json_trays(custom_json_data=None):
                         x2 = bbox[2] if len(bbox) > 2 else 1.0
                         y2 = bbox[3] if len(bbox) > 3 else 1.0
 
+                        # Resolve item_code: prefer class_key (matches YOLO class names),
+                        # then fall back to code, then filename-derived key
+                        resolved_item_code = (
+                            s.get("class_key")
+                            or s.get("code", "")
+                            or s.get("filename", "").replace(".jpg", "").replace(".png", "")
+                        )
                         slot_obj = TraySlot(
                             tray_template_id=template.id,
                             slot_number=s.get("slot_number", idx + 1),
                             item_name=s.get("name", f"Slot {idx + 1}"),
-                            item_code=s.get("filename", "").replace(".jpg", "").replace(".png", "") or s.get("code", ""),
+                            item_code=resolved_item_code,
                             bbox_x1_norm=float(x1),
                             bbox_y1_norm=float(y1),
                             bbox_x2_norm=float(x2),

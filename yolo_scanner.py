@@ -49,8 +49,31 @@ class YOLOToolScanner:
         self.model = None
         self.model_path = model_path
         self.class_names: Dict[int, str] = {}
+        self._alias_map: Dict[str, str] = {}
+        self._load_tool_mappings()
         if model_path and ULTRALYTICS_AVAILABLE:
             self.load_model(model_path)
+
+    def _load_tool_mappings(self):
+        """Loads tool code/part-number to class_name alias mappings from mock_database/data.json."""
+        try:
+            import json
+            data_file = Path(__file__).parent / "mock_database" / "data.json"
+            if data_file.exists():
+                with open(data_file, "r", encoding="utf-8") as f:
+                    items = json.load(f)
+                    for it in items:
+                        target = (it.get("name_en") or it.get("class_key") or it.get("code") or "").strip().lower().replace("-", "_").replace(" ", "_")
+                        code = (it.get("code") or "").strip().lower().replace("-", "_").replace(" ", "_")
+                        name_th = (it.get("name") or "").strip().lower()
+                        if target:
+                            if code:
+                                self._alias_map[code] = target
+                            if name_th:
+                                self._alias_map[name_th] = target
+        except Exception as e:
+            logger.warning(f"Could not load tool mappings: {e}")
+
 
     def load_model(self, model_path: str) -> bool:
         """Loads YOLO weights (.pt file)."""
@@ -271,7 +294,8 @@ class YOLOToolScanner:
         tray_template: Dict[str, Any],
         conf_threshold: float = 0.40,
         iou_threshold: float = 0.45,
-        slot_overlap_threshold: float = 0.25
+        slot_overlap_threshold: float = 0.25,
+        detections: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Part 2: Checks if tools are complete and placed correctly in each slot of the tray.
@@ -280,11 +304,17 @@ class YOLOToolScanner:
         Args:
             image: Image containing the tray
             tray_template: Template dictionary with 'slots' definition
+            conf_threshold: Minimum confidence for tool detections
+            iou_threshold: IOU threshold for NMS
+            slot_overlap_threshold: Minimum overlap ratio for slot matching
+            detections: Optional precomputed list of detections
         Returns:
             Verification summary including present, missing, correct, misplaced items.
         """
         h, w = image.shape[:2]
-        detections = self.detect_tools(image, conf_threshold, iou_threshold)
+        if detections is None:
+            detections = self.detect_tools(image, conf_threshold, iou_threshold)
+
 
         # 1. Automatic tray boundary detection to handle camera shift / zoom / table background
         tx, ty, tw, th = self._detect_tray_bounds(image)
@@ -298,7 +328,7 @@ class YOLOToolScanner:
         for slot in slots:
             slot_num = slot.get("slot_number", 0)
             expected_name = slot.get("item_name") or slot.get("name", f"Slot {slot_num}")
-            expected_code = slot.get("item_code") or slot.get("code", "")
+            expected_code = slot.get("item_code") or slot.get("class_key") or slot.get("code", "")
             
             # Slot bounding box [x1_norm, y1_norm, x2_norm, y2_norm]
             bbox_norm = slot.get("bbox_norm") or [
@@ -358,11 +388,22 @@ class YOLOToolScanner:
                 detected_name = best_det["class_name"]
                 
                 # Check if item matches expected item
-                is_correct = (
-                    expected_code.lower() in detected_name.lower() or
-                    detected_name.lower() in expected_name.lower() or
-                    expected_name.lower() in detected_name.lower()
-                )
+                norm_det = detected_name.strip().lower().replace("-", "_").replace(" ", "_")
+                norm_exp_code = expected_code.strip().lower().replace("-", "_").replace(" ", "_") if expected_code else ""
+                norm_exp_name = expected_name.strip().lower() if expected_name else ""
+
+                is_correct = False
+                if norm_exp_code:
+                    if norm_exp_code == norm_det or norm_exp_code in norm_det or norm_det in norm_exp_code:
+                        is_correct = True
+                    elif self._alias_map.get(norm_exp_code) == norm_det:
+                        is_correct = True
+
+                if not is_correct and norm_exp_name:
+                    if norm_det in norm_exp_name or norm_exp_name in norm_det:
+                        is_correct = True
+                    elif self._alias_map.get(norm_exp_name) == norm_det:
+                        is_correct = True
 
                 status = "correct" if is_correct else "wrong_item"
                 slot_results.append({

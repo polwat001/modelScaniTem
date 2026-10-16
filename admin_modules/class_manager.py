@@ -30,22 +30,28 @@ def import_classes_from_legacy_data(custom_data=None):
         imported_count = 0
         with get_db() as db:
             for item in data:
-                code = item.get("code", "").strip()
+                # Prefer class_key (matches YOLO detection class name), then identifier name_en, then code
+                class_key = (
+                    item.get("class_key")
+                    or (item.get("name_en") if item.get("name_en") and ("_" in item.get("name_en") or " " not in item.get("name_en")) else "")
+                    or item.get("code", "")
+                ).strip()
+                code = item.get("code", class_key).strip()
                 name_th = (item.get("name") or item.get("name_th") or code).strip()
-                name_en = (item.get("name_en") or code).strip()
+                name_en = (item.get("name_en") or class_key or code).strip()
                 category = item.get("category", "Special Tools").strip()
                 desc = item.get("description", f"Auto-imported (Code: {code})").strip()
-                if not code:
+                if not class_key:
                     continue
 
                 # Check if already exists
                 existing = db.query(ToolClass).filter(
-                    (ToolClass.class_key == code) | (ToolClass.name_th == name_th)
+                    (ToolClass.class_key == class_key) | (ToolClass.name_th == name_th)
                 ).first()
 
                 if not existing:
                     new_class = ToolClass(
-                        class_key=code,
+                        class_key=class_key,
                         name_en=name_en,
                         name_th=name_th,
                         category=category,
@@ -57,8 +63,6 @@ def import_classes_from_legacy_data(custom_data=None):
 
         return imported_count
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการนำเข้าข้อมูล: {e}")
-        return 0
         st.error(f"เกิดข้อผิดพลาดในการนำเข้าข้อมูล: {e}")
         return 0
 

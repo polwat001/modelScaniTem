@@ -15,9 +15,31 @@ from db import get_db
 from models_db import TrainingImage, ImageLabel, ToolClass
 
 
+SUPPORTED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".cr2"]
+RAW_EXTENSIONS = [".cr2"]
+
+
 def calculate_image_hash(image_bytes: bytes) -> str:
     """Calculates SHA-256 hash of image file content."""
     return hashlib.sha256(image_bytes).hexdigest()
+
+
+def decode_image_file(file_bytes: bytes, ext: str) -> tuple[Image.Image, str]:
+    """
+    Decodes image bytes from various formats (including Canon RAW .cr2 and .bmp) into a PIL Image.
+    Returns (pil_img, save_extension).
+    For RAW files (.cr2), converts to .jpg for YOLO training, Roboflow, and web display compatibility.
+    """
+    ext_lower = ext.lower()
+    if ext_lower in RAW_EXTENSIONS:
+        import rawpy
+        with rawpy.imread(io.BytesIO(file_bytes)) as raw:
+            rgb_array = raw.postprocess(use_camera_wb=True)
+            pil_img = Image.fromarray(rgb_array)
+        return pil_img, ".jpg"
+    else:
+        pil_img = Image.open(io.BytesIO(file_bytes))
+        return pil_img, ext_lower
 
 
 def save_uploaded_image(
@@ -28,6 +50,7 @@ def save_uploaded_image(
 ) -> tuple[str, str]:
     """
     Saves uploaded image file to IMAGES_DIR and registers in PostgreSQL.
+    Supports JPG, JPEG, PNG, WEBP, BMP, and Canon RAW (CR2).
     Returns:
         (status, message)
         where status is 'success', 'duplicate', or 'error'
@@ -35,8 +58,8 @@ def save_uploaded_image(
     try:
         # Check file extension
         ext = Path(file.name).suffix.lower()
-        if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
-            return "error", f"สกุลไฟล์ไม่รองรับ: {ext}"
+        if ext not in SUPPORTED_EXTENSIONS:
+            return "error", f"สกุลไฟล์ไม่รองรับ: {ext} (รองรับ: {', '.join(SUPPORTED_EXTENSIONS)})"
 
         # Read bytes and compute SHA-256 hash
         file_bytes = file.getvalue()
@@ -49,16 +72,29 @@ def save_uploaded_image(
                 if existing:
                     return "duplicate", existing.filename
 
-        # Verify image content and dimensions
-        pil_img = Image.open(io.BytesIO(file_bytes))
+        # Decode image content (handles CR2, BMP, WEBP, PNG, JPG)
+        pil_img, save_ext = decode_image_file(file_bytes, ext)
         width, height = pil_img.size
 
         # Generate safe unique filename
-        safe_filename = f"{Path(file.name).stem}_{uuid.uuid4().hex[:8]}{ext}"
+        safe_filename = f"{Path(file.name).stem}_{uuid.uuid4().hex[:8]}{save_ext}"
         target_path = IMAGES_DIR / safe_filename
 
-        # Save to filesystem
-        pil_img.save(target_path)
+        # Save to filesystem with appropriate format encoding
+        if save_ext in [".jpg", ".jpeg"]:
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            pil_img.save(target_path, "JPEG", quality=95)
+        elif save_ext == ".bmp":
+            if pil_img.mode not in ("RGB", "L"):
+                pil_img = pil_img.convert("RGB")
+            pil_img.save(target_path, "BMP")
+        elif save_ext == ".webp":
+            pil_img.save(target_path, "WEBP", quality=95)
+        elif save_ext == ".png":
+            pil_img.save(target_path, "PNG")
+        else:
+            pil_img.save(target_path)
 
         # Register into DB
         with get_db() as db:
@@ -98,8 +134,8 @@ def render_image_collector(current_user: dict):
                 st.caption("ระบบจะตรวจสอบเนื้อหาไฟล์ภาพ หากมีภาพนี้ในระบบแล้วจะข้ามให้อัตโนมัติ")
 
         uploaded_files = st.file_uploader(
-            "เลือกไฟล์รูปภาพ (JPG, PNG, WEBP)",
-            type=["jpg", "jpeg", "png", "webp"],
+            "เลือกไฟล์รูปภาพ (JPG, PNG, WEBP, BMP, CR2)",
+            type=["jpg", "jpeg", "png", "webp", "bmp", "cr2"],
             accept_multiple_files=True
         )
 

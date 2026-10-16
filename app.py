@@ -569,8 +569,14 @@ def get_product_info(filename):
     try:
         with open('mock_database/data.json', 'r', encoding='utf-8') as f:
             data = json.load(f)
+            base = os.path.basename(filename)
+            base_no_ext = os.path.splitext(base)[0]
             for item in data:
-                if item['filename'] == os.path.basename(filename):
+                if (item.get('filename') == base or 
+                    item.get('code') == base or 
+                    item.get('code') == base_no_ext or
+                    item.get('name_en') == base_no_ext or
+                    item.get('class_key') == base_no_ext):
                     return item
     except: return None
     return None
