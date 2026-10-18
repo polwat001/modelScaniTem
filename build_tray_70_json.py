@@ -1,4 +1,6 @@
 import json
+import cv2
+import numpy as np
 from pathlib import Path
 
 # Tool metadata: (seq, part_number, name_th, class_key)
@@ -102,6 +104,23 @@ for seq, part_no, name_th, class_key in tools_info:
     else:
         x1_norm, y1_norm, x2_norm, y2_norm = 0.0, 0.0, 1.0, 1.0
 
+    # Calculate default orientation and tolerance based on tool geometry
+    if polygon and len(polygon) >= 5:
+        pts = np.array(polygon, dtype=np.float32)
+        _, eigenvectors = cv2.PCACompute(pts, mean=None)
+        pv = eigenvectors[0].tolist()
+        orient_vec = [round(pv[0], 3), round(pv[1], 3)]
+    else:
+        orient_vec = [0.0, 1.0]
+
+    # Assign tailored tolerance
+    if "ลูกบ๊อกซ์" in name_th or "ลูกบล๊อค" in name_th:
+        tol = {"center_px": 14, "angle_deg": 35.0, "iou_min": 0.40}
+    elif "ประแจ" in name_th or "ไขควง" in name_th or "ด้าม" in name_th:
+        tol = {"center_px": 16, "angle_deg": 18.0, "iou_min": 0.45}
+    else:
+        tol = {"center_px": 15, "angle_deg": 20.0, "iou_min": 0.42}
+
     slots.append({
         "slot_number": seq,
         "part_number": part_no,
@@ -110,7 +129,9 @@ for seq, part_no, name_th, class_key in tools_info:
         "class_key": class_key,
         "filename": f"{part_no}.png",
         "bbox_norm": [x1_norm, y1_norm, x2_norm, y2_norm],
-        "polygon": polygon
+        "polygon": polygon,
+        "tolerance": tol,
+        "orientation_vec": orient_vec
     })
 
 tray_template = {
@@ -122,12 +143,12 @@ tray_template = {
     "slots": slots
 }
 
-out_tray_path = Path("mock_database/tray_templates/tray_ya1_2_70_tools.json")
-out_tray_path.parent.mkdir(parents=True, exist_ok=True)
-with open(out_tray_path, "w", encoding="utf-8") as f:
-    json.dump(tray_template, f, ensure_ascii=False, indent=2)
-
-print(f"Successfully generated {out_tray_path} with {len(slots)} slots!")
+for fname in ["tray_ya1_2_70_tools.json", "TRAY_YA_1_2.json"]:
+    out_tray_path = Path("mock_database/tray_templates") / fname
+    out_tray_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_tray_path, "w", encoding="utf-8") as f:
+        json.dump(tray_template, f, ensure_ascii=False, indent=2)
+    print(f"Successfully generated {out_tray_path} with {len(slots)} slots!")
 
 # Also generate a dataset/classes JSON file for these 70 tools
 classes_70 = []

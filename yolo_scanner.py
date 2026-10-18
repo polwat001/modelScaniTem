@@ -295,26 +295,44 @@ class YOLOToolScanner:
         conf_threshold: float = 0.40,
         iou_threshold: float = 0.45,
         slot_overlap_threshold: float = 0.25,
-        detections: Optional[List[Dict[str, Any]]] = None
+        detections: Optional[List[Dict[str, Any]]] = None,
+        use_workflow: bool = True,
+        reference_image: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         """
         Part 2: Checks if tools are complete and placed correctly in each slot of the tray.
-        Supports automatic tray boundary alignment, local slot tracking for moved/tilted trays,
-        and hybrid visual/YOLO verification.
-        Args:
-            image: Image containing the tray
-            tray_template: Template dictionary with 'slots' definition
-            conf_threshold: Minimum confidence for tool detections
-            iou_threshold: IOU threshold for NMS
-            slot_overlap_threshold: Minimum overlap ratio for slot matching
-            detections: Optional precomputed list of detections
-        Returns:
-            Verification summary including present, missing, correct, misplaced items.
+        When use_workflow=True, delegates to the 5-step scan_workflow pipeline (Quality Gate,
+        Homography Alignment, Slot Presence, Shape & Placement Check, Aggregator).
+        Falls back to local tracking & YOLO detection matching when use_workflow=False.
         """
+        if use_workflow:
+            try:
+                from scan_workflow import ScanAggregator
+                agg = ScanAggregator()
+                agg.setup(tray_template, reference_image=reference_image)
+                summary = agg.scan(image)
+
+                return {
+                    "is_complete": summary.is_complete,
+                    "total_slots": summary.total_slots,
+                    "correct_count": summary.correct_count,
+                    "missing_count": summary.missing_count,
+                    "misplaced_count": summary.misplaced_count,
+                    "recheck_count": summary.recheck_count,
+                    "wrong_count": summary.misplaced_count,  # backward compat
+                    "slot_results": summary.slot_results,
+                    "annotated_image": summary.annotated_image,
+                    "quality": summary.quality.to_dict() if summary.quality else None,
+                    "align": summary.align.to_dict() if summary.align else None,
+                    "all_detections": detections or [],
+                    "unmatched_detections": [],
+                }
+            except Exception as e:
+                logger.warning(f"scan_workflow execution failed, falling back to legacy verify: {e}")
+
         h, w = image.shape[:2]
         if detections is None:
             detections = self.detect_tools(image, conf_threshold, iou_threshold)
-
 
         # 1. Automatic tray boundary detection to handle camera shift / zoom / table background
         tx, ty, tw, th = self._detect_tray_bounds(image)
@@ -516,14 +534,16 @@ class YOLOToolScanner:
         # Draw bounding boxes first using OpenCV
         for slot in verification_result.get("slot_results", []):
             x1, y1, x2, y2 = slot["slot_bbox"]
-            status = slot["status"]
+            status = slot.get("status", "recheck")
 
             if status == "correct":
                 color_bgr = (0, 220, 0)      # Green
             elif status == "missing":
                 color_bgr = (0, 0, 255)      # Red
+            elif status in ("misplaced", "wrong_item"):
+                color_bgr = (0, 180, 240)    # Yellow / Gold
             else:
-                color_bgr = (0, 140, 255)    # Orange
+                color_bgr = (130, 130, 130)  # Gray for recheck
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color_bgr, 2)
 
@@ -535,8 +555,8 @@ class YOLOToolScanner:
 
         for slot in verification_result.get("slot_results", []):
             x1, y1, x2, y2 = slot["slot_bbox"]
-            status = slot["status"]
-            slot_num = slot["slot_number"]
+            status = slot.get("status", "recheck")
+            slot_num = slot.get("slot_number", 0)
 
             if status == "correct":
                 color_rgb = (0, 180, 0)
@@ -544,9 +564,13 @@ class YOLOToolScanner:
             elif status == "missing":
                 color_rgb = (220, 30, 30)
                 status_th = "ขาดหาย"
+            elif status in ("misplaced", "wrong_item"):
+                color_rgb = (220, 160, 0)
+                detected = slot.get("detected_item") or slot.get("reason", "ผิดตำแหน่ง")
+                status_th = f"ผิดตำแหน่ง ({detected})" if len(str(detected)) < 15 else "ผิดตำแหน่ง"
             else:
-                color_rgb = (235, 130, 0)
-                status_th = f"ผิดช่อง ({slot['detected_item']})"
+                color_rgb = (120, 120, 120)
+                status_th = "ตรวจซ้ำ"
 
             badge_text = f"#{slot_num}: {status_th}"
             bbox = draw.textbbox((x1, y1), badge_text, font=font)

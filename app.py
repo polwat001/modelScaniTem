@@ -5,6 +5,7 @@ import json
 import os
 import time
 from scanner_module import ShapeScanner
+from scan_workflow import ScanAggregator, ImageQualityGate, generate_tray_guide_overlay
 
 st.set_page_config(layout="wide", page_title="ระบบเช็คลิสต์เครื่องมือ")
 
@@ -1040,7 +1041,7 @@ def render_tray_register():
 
 
 def render_tray_check():
-    """ตรวจสอบถาดว่าเครื่องมือครบหรือขาด"""
+    """ตรวจสอบถาดเครื่องมือด้วย Slot-Reference Workflow (4 สถานะ, Quality Gate, Alignment Guide)"""
     templates = scanner.list_tray_templates()
     if not templates:
         st.info("ยังไม่มีถาดที่ลงทะเบียน กรุณาไปที่แท็บ 'ลงทะเบียนถาด' ก่อน")
@@ -1056,134 +1057,308 @@ def render_tray_check():
                                    key="tray_check_select")
     selected_id = tray_options[selected_label]
 
-    sel_tray = next((t for t in templates if t['tray_id'] == selected_id), None)
-    if sel_tray:
-        reg_at = sel_tray.get('registered_at', '-')[:10]
-        st.caption(f"ลงทะเบียนเมื่อ: {reg_at}")
+    # โหลดไฟล์ Template JSON ของถาดที่เลือก
+    from pathlib import Path
+    template_dir = Path("mock_database/tray_templates")
+    template_file = template_dir / f"{selected_id}.json"
+    if not template_file.exists():
+        for f in template_dir.glob("*.json"):
+            try:
+                with open(f, "r", encoding="utf-8") as jf:
+                    td = json.load(jf)
+                if td.get("tray_id") == selected_id:
+                    template_file = f
+                    break
+            except Exception:
+                continue
 
-    st.divider()
+    tray_data = {}
+    if template_file.exists():
+        try:
+            with open(template_file, "r", encoding="utf-8") as f:
+                tray_data = json.load(f)
+        except Exception as e:
+            st.error(f"ไม่สามารถโหลดข้อมูลถาด {selected_id}: {e}")
 
-    input_method = st.radio("เลือกวิธี:", ["Camera", "Upload Image"],
+    slots = tray_data.get("slots", [])
+
+    # โหลด Template Reference Image (Golden Sample)
+    ref_img_path = Path(f"admin_data/tray_refs/{selected_id}.jpg")
+    if not ref_img_path.exists():
+        ref_img_path = Path(f"admin_data/tray_refs/{selected_id}.png")
+    if not ref_img_path.exists() and selected_id == "TRAY_YA_1_2":
+        ref_img_path = Path("test_verified.jpg")
+
+    ref_img = cv2.imread(str(ref_img_path)) if ref_img_path.exists() else None
+
+    # ภาพร่างนำทางการเล็ง (Camera Alignment Guide Overlay)
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #242A33 0%, #171B21 100%); border: 1.5px solid #00D2FF;
+                border-radius: 8px; padding: 10px 14px; margin: 10px 0 14px 0; color: #FFFFFF;">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 1.15rem;">📐</span>
+                <span style="font-weight: 700; font-size: 0.95rem; color: #00E6FF;">ภาพร่างนำทางการถ่ายภาพ (Alignment Guide)</span>
+            </div>
+            <span style="background: rgba(0, 210, 255, 0.15); color: #00E6FF; border: 1px solid #00D2FF;
+                         padding: 2px 8px; border-radius: 6px; font-size: 0.74rem; font-weight: 600;">
+                Top-Down Inspection
+            </span>
+        </div>
+        <p style="margin: 6px 0 0 0; color: #C7C7C7; font-size: 0.82rem; line-height: 1.4;">
+            เล็งกล้องมือถือ/iPad จากมุมตั้งฉาก ให้ขอบถาดจริงตรงกับเส้นกรอบด้านล่าง เพื่อให้ระบบวิเคราะห์ทั้ง 70 ช่องได้อย่างแม่นยำ
+            (ส่วนอัปโหลดไฟล์มีไว้เพื่อทดสอบระบบ)
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("🖼️ ดูภาพร่างโครงสร้างถาดต้นแบบ (Template Blueprint Guide)", expanded=False):
+        if tray_data and slots:
+            guide_img = generate_tray_guide_overlay(tray_data, width=1024, height=768)
+            st.image(guide_img, channels="BGR", use_container_width=True,
+                     caption=f"โครงร่างตำแหน่ง 70 ช่องของ {tray_data.get('tray_name')}")
+
+    # วิธีการนำเข้าภาพ
+    input_method = st.radio("เลือกวิธีถ่าย/ทดสอบ:",
+                            ["Camera (ถ่ายจากกล้องมือถือ/iPad)", "Upload Image (ทดสอบระบบด้วยไฟล์)"],
                             horizontal=True, key="tray_check_method")
     opencv_img = None
-    if input_method == "Camera":
-        img_file = st.camera_input("ถ่ายภาพถาดปัจจุบัน", key="tray_check_cam")
+    if "Camera" in input_method:
+        img_file = st.camera_input("ถ่ายภาพถาดปัจจุบัน (จัดมุมมองให้ตรงกับภาพร่าง)", key="tray_check_cam")
     else:
-        img_file = st.file_uploader("อัปโหลดภาพถาดปัจจุบัน",
+        img_file = st.file_uploader("อัปโหลดภาพถาดปัจจุบัน (สำหรับทดสอบ)",
                                     type=['jpg', 'png', 'jpeg'], key="tray_check_file")
 
     if img_file:
         opencv_img = cv2.imdecode(np.frombuffer(img_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-        st.image(opencv_img, channels="BGR", caption="ภาพถาดปัจจุบัน", use_container_width=True)
 
+    # Quality Gate & ปุ่มตรวจสอบ
     if opencv_img is not None:
-        if st.button("\U0001f50d ตรวจสอบถาด",
+        q_gate = ImageQualityGate()
+        q_res = q_gate.check(opencv_img)
+
+        if q_res.passed:
+            st.markdown(f"""
+            <div style="background: #FFFFFF; border: 1.5px solid #1E9E40; border-left: 5px solid #1E9E40;
+                        border-radius: 6px; padding: 8px 12px; margin: 10px 0; display: flex; align-items: center; justify-content: space-between;">
+                <div>
+                    <strong style="color: #1E9E40; font-size: 0.90rem;">✅ คุณภาพภาพถ่ายพร้อมตรวจ (Quality Gate Passed)</strong>
+                    <div style="color: #525252; font-size: 0.78rem; margin-top: 2px;">
+                        ความคมชัด: {q_res.blur_score:.1f} (เกณฑ์ ≥ 80) | ความสว่าง: {q_res.brightness:.1f}
+                    </div>
+                </div>
+                <span style="background: #EAF7ED; color: #1E9E40; padding: 3px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600;">พร้อมสแกน</span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            issues_text = " • ".join(q_res.issues)
+            st.markdown(f"""
+            <div style="background: #FFF8E6; border: 1.5px solid #E59800; border-left: 5px solid #E59800;
+                        border-radius: 6px; padding: 8px 12px; margin: 10px 0;">
+                <strong style="color: #B57000; font-size: 0.90rem;">⚠️ ข้อสังเกตคุณภาพภาพ (Quality Warning):</strong>
+                <div style="color: #7A4B00; font-size: 0.80rem; margin-top: 2px;">{issues_text}</div>
+                <div style="color: #8C8C8C; font-size: 0.74rem; margin-top: 2px;">ความคมชัด: {q_res.blur_score:.1f} | ความสว่าง: {q_res.brightness:.1f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if st.button("🔍 ตรวจสอบถาดเครื่องมือครบ 70 ช่อง (Inspect Tray)",
                      type="primary", use_container_width=True, key="tray_check_btn"):
-            with st.spinner("กำลังเปรียบเทียบตำแหน่งเครื่องมือ..."):
-                results, tray_info = scanner.check_tray_slots(opencv_img, selected_id)
-            if results is None:
-                st.error(f"เกิดข้อผิดพลาด: {tray_info}")
-            else:
-                st.session_state.tray_check_results = results
-                st.session_state.tray_check_data = tray_info
+            with st.spinner("กำลังปรับแนวภาพและตรวจสอบช่องเครื่องมือทั้ง 70 รายการ..."):
+                agg = ScanAggregator(tray_refs_dir="admin_data/tray_refs")
+                agg.setup(tray_data, reference_image=ref_img)
+                summary = agg.scan(opencv_img, skip_quality=False)
+
+                st.session_state.tray_check_summary = summary
+                st.session_state.tray_check_selected_id = selected_id
+                st.session_state.tray_check_input_img = opencv_img
                 st.rerun()
 
-    # แสดงผลการตรวจสอบ (ถ้ามี และตรงกับถาดที่เลือกอยู่)
-    r_cache = st.session_state.get('tray_check_results')
-    d_cache = st.session_state.get('tray_check_data')
-    if r_cache and d_cache and d_cache.get('tray_id') == selected_id:
-        results  = r_cache
-        tray_info = d_cache
+    # แสดงผลสรุป 4 สถานะ
+    summary = st.session_state.get('tray_check_summary')
+    cached_id = st.session_state.get('tray_check_selected_id')
 
-        present  = [r for r in results if r['status'] == 'present']
-        missing  = [r for r in results if r['status'] == 'missing']
-        pct      = int(len(present) / len(results) * 100) if results else 0
+    if summary and cached_id == selected_id:
+        total = summary.total_slots
+        correct = summary.correct_count
+        missing = summary.missing_count
+        misplaced = summary.misplaced_count
+        recheck = summary.recheck_count
+        pct = int((correct / total * 100)) if total > 0 else 0
 
+        # แผง 4 สถานะ
         st.markdown(f"""
-        <div style="display:flex;gap:8px;margin:10px 0 6px 0;">
-            <div style="flex:1;background:#2C2C2C;color:#FFFFFF;border-radius:6px;padding:8px;text-align:center;">
-                <div style="font-size:10px;color:#C7C7C7;">ทั้งหมด</div>
-                <div style="font-size:20px;font-weight:700;">{len(results)}</div>
+        <div style="display: flex; gap: 6px; margin: 14px 0 8px 0; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 70px; background: #2C2C2C; color: #FFFFFF; border-radius: 6px; padding: 6px 8px; text-align: center;">
+                <div style="font-size: 10px; color: #C7C7C7;">ทั้งหมด</div>
+                <div style="font-size: 18px; font-weight: 700;">{total}</div>
             </div>
-            <div style="flex:1;background:#E5E5E5;color:#2C2C2C;border:1px solid #C7C7C7;
-                        border-radius:6px;padding:8px;text-align:center;">
-                <div style="font-size:10px;color:#525252;">ครบ</div>
-                <div style="font-size:20px;font-weight:700;">{len(present)}</div>
+            <div style="flex: 1; min-width: 70px; background: #E8F7ED; border: 1.5px solid #1E9E40; color: #1E9E40; border-radius: 6px; padding: 6px 8px; text-align: center;">
+                <div style="font-size: 10px; font-weight: 600;">🟢 ครบ</div>
+                <div style="font-size: 18px; font-weight: 700;">{correct}</div>
             </div>
-            <div style="flex:1;background:{'#FFFFFF' if missing else '#E5E5E5'};
-                        border:{'2px solid #E81D23' if missing else '1px solid #C7C7C7'};
-                        border-radius:6px;padding:8px;text-align:center;">
-                <div style="font-size:10px;color:{'#E81D23' if missing else '#525252'};">ขาด</div>
-                <div style="font-size:20px;font-weight:700;color:{'#E81D23' if missing else '#2C2C2C'};"
-                >{len(missing)}</div>
+            <div style="flex: 1; min-width: 70px; background: {'#FFF0F0' if missing else '#E5E5E5'}; border: 1.5px solid {'#E81D23' if missing else '#C7C7C7'}; color: {'#E81D23' if missing else '#525252'}; border-radius: 6px; padding: 6px 8px; text-align: center;">
+                <div style="font-size: 10px; font-weight: 600;">🔴 ขาดหาย</div>
+                <div style="font-size: 18px; font-weight: 700;">{missing}</div>
+            </div>
+            <div style="flex: 1; min-width: 70px; background: {'#FFF9E6' if misplaced else '#E5E5E5'}; border: 1.5px solid {'#D4A000' if misplaced else '#C7C7C7'}; color: {'#B57000' if misplaced else '#525252'}; border-radius: 6px; padding: 6px 8px; text-align: center;">
+                <div style="font-size: 10px; font-weight: 600;">🟡 ผิดตำแหน่ง</div>
+                <div style="font-size: 18px; font-weight: 700;">{misplaced}</div>
+            </div>
+            <div style="flex: 1; min-width: 70px; background: {'#F0F0F0' if recheck else '#E5E5E5'}; border: 1.5px solid {'#808080' if recheck else '#C7C7C7'}; color: #525252; border-radius: 6px; padding: 6px 8px; text-align: center;">
+                <div style="font-size: 10px; font-weight: 600;">↩️ ตรวจซ้ำ</div>
+                <div style="font-size: 18px; font-weight: 700;">{recheck}</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
         st.progress(pct / 100)
 
-        if not missing:
+        if summary.is_complete:
             st.markdown("""
-            <div style="background:#FFFFFF;border:2px solid #2C2C2C;border-radius:8px;
-                        padding:10px;text-align:center;margin:6px 0;">
-                <strong style="color:#2C2C2C;">✅ เครื่องมือครบทุกชิ้น!</strong>
+            <div style="background: #E8F7ED; border: 2px solid #1E9E40; border-radius: 8px;
+                        padding: 10px; text-align: center; margin: 8px 0;">
+                <strong style="color: #1E9E40; font-size: 1.02rem;">✅ ตรวจสอบเครื่องมือครบทุกช่อง 100% เรียบร้อย!</strong>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            status_desc = []
+            if missing > 0: status_desc.append(f"ขาด {missing} ชิ้น")
+            if misplaced > 0: status_desc.append(f"ผิดตำแหน่ง {misplaced} ชิ้น")
+            if recheck > 0: status_desc.append(f"ตรวจซ้ำ {recheck} ชิ้น")
+            st.markdown(f"""
+            <div style="background: #FFF2F2; border: 1.5px solid #E81D23; border-radius: 8px;
+                        padding: 8px 12px; text-align: center; margin: 8px 0;">
+                <strong style="color: #E81D23; font-size: 0.94rem;">⚠️ ถาดไม่สมบูรณ์: {', '.join(status_desc)}</strong>
             </div>
             """, unsafe_allow_html=True)
 
-        # รายการแต่ละชิ้น
-        with st.container(height=280):
-            for r in results:
-                is_p  = r['status'] == 'present'
-                icon  = "✅" if is_p else ("❌" if r['status'] == 'missing' else "❓")
-                bg    = "#FFFFFF" if is_p else ("#FFF0F0" if r['status'] == 'missing' else "#FAFAFA")
-                bdr   = "#E5E5E5" if is_p else ("#E81D23" if r['status'] == 'missing' else "#C7C7C7")
-                nstyl = "color:#525252;" if is_p else "color:#2C2C2C;font-weight:700;"
-                dpct  = r.get('brightness_diff_pct', 0)
-                st.markdown(f"""
-                <div style="background:{bg};border:1px solid {bdr};border-radius:6px;
-                     padding:6px 10px;margin-bottom:4px;display:flex;align-items:center;gap:8px;">
-                    <span style="font-size:1.05rem;flex-shrink:0;">{icon}</span>
-                    <span style="{nstyl}font-size:0.86rem;flex:1;overflow:hidden;
-                                 text-overflow:ellipsis;white-space:nowrap;">{r['name']}</span>
-                    <span style="background:#E5E5E5;color:#525252;font-size:0.68rem;
-                         padding:1px 6px;border-radius:8px;flex-shrink:0;">{r['category']}</span>
-                    <span style="font-size:0.68rem;color:#C7C7C7;flex-shrink:0;">Δ{dpct:.0f}%</span>
-                </div>
-                """, unsafe_allow_html=True)
+        # ภาพผลลัพธ์แบบสลับแท็บ
+        tab_anno, tab_orig, tab_wire = st.tabs([
+            "🖼️ ภาพพร้อมผลการตรวจ (Annotated)",
+            "📷 ภาพถ่ายต้นฉบับ (Original)",
+            "📐 ภาพร่างไกด์ (Template Blueprint)"
+        ])
 
-        # ปุ่มเพิ่มรายการขาดเข้า Checklist
-        if missing:
-            if st.button(
-                f"\u2795 เพิ่ม {len(missing)} รายการขาดเข้า Checklist",
-                use_container_width=True, type="primary", key="tray_add_missing_btn"
-            ):
-                existing_files = [x['filename'] for x in st.session_state.detected_list]
+        with tab_anno:
+            if summary.annotated_image is not None:
+                st.image(summary.annotated_image, channels="BGR", use_container_width=True,
+                         caption=f"ผลการตรวจสอบถาด: 🟢 {correct}  🔴 {missing}  🟡 {misplaced}  ↩️ {recheck}")
+
+        with tab_orig:
+            orig_img = st.session_state.get('tray_check_input_img')
+            if orig_img is not None:
+                st.image(orig_img, channels="BGR", use_container_width=True, caption="ภาพถ่ายต้นฉบับ")
+
+        with tab_wire:
+            if tray_data and slots:
+                wire = generate_tray_guide_overlay(tray_data, width=1024, height=768)
+                st.image(wire, channels="BGR", use_container_width=True, caption="โครงสร้าง 70 ช่องต้นแบบ")
+
+        # รายการแยกแต่ละช่องพร้อมฟิลเตอร์
+        st.markdown("<h4 style='font-size: 15px; margin: 14px 0 6px 0; color: #2C2C2C;'>รายละเอียดแต่ละช่อง:</h4>", unsafe_allow_html=True)
+
+        filter_choice = st.radio(
+            "กรองสถานะ:",
+            options=["ทั้งหมด", "🔴 ขาดหาย", "🟡 ผิดตำแหน่ง", "↩️ ตรวจซ้ำ", "🟢 ครบ"],
+            format_func=lambda x: {
+                "ทั้งหมด": f"ทั้งหมด ({total})",
+                "🔴 ขาดหาย": f"🔴 ขาดหาย ({missing})",
+                "🟡 ผิดตำแหน่ง": f"🟡 ผิดตำแหน่ง ({misplaced})",
+                "↩️ ตรวจซ้ำ": f"↩️ ตรวจซ้ำ ({recheck})",
+                "🟢 ครบ": f"🟢 ครบ ({correct})"
+            }[x],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="tray_slot_filter_radio"
+        )
+
+        target_status = {
+            "ทั้งหมด": None,
+            "🔴 ขาดหาย": "missing",
+            "🟡 ผิดตำแหน่ง": "misplaced",
+            "↩️ ตรวจซ้ำ": "recheck",
+            "🟢 ครบ": "correct"
+        }[filter_choice]
+
+        filtered_slots = summary.slot_results
+        if target_status is not None:
+            filtered_slots = [s for s in filtered_slots if s["status"] == target_status]
+
+        with st.container(height=340):
+            if not filtered_slots:
+                st.markdown("<p style='text-align: center; color: #888; padding: 20px 0;'>ไม่พบรายการในสถานะนี้</p>", unsafe_allow_html=True)
+            else:
+                for s in filtered_slots:
+                    st_val = s["status"]
+                    sn = s["slot_number"]
+                    name = s.get("item_name") or f"ช่องที่ {sn}"
+                    reason = s.get("reason", "")
+                    conf = s.get("confidence", 0.0)
+
+                    if st_val == "correct":
+                        icon, bg, bdr, tag_color = "🟢", "#FFFFFF", "#1E9E40", "#1E9E40"
+                    elif st_val == "missing":
+                        icon, bg, bdr, tag_color = "🔴", "#FFF2F2", "#E81D23", "#E81D23"
+                    elif st_val == "misplaced":
+                        icon, bg, bdr, tag_color = "🟡", "#FFFBE6", "#E5A000", "#B57000"
+                    else:
+                        icon, bg, bdr, tag_color = "↩️", "#F7F7F7", "#888888", "#525252"
+
+                    st.markdown(f"""
+                    <div style="background: {bg}; border: 1px solid {bdr}; border-radius: 6px;
+                                padding: 6px 10px; margin-bottom: 5px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                        <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+                            <span style="font-size: 1.1rem; flex-shrink: 0;">{icon}</span>
+                            <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                <strong style="color: #2C2C2C; font-size: 0.86rem;">#{sn} {name}</strong>
+                                <div style="color: #525252; font-size: 0.74rem;">{reason}</div>
+                            </div>
+                        </div>
+                        <div style="text-align: right; flex-shrink: 0;">
+                            <span style="background: #E5E5E5; color: {tag_color}; font-size: 0.72rem; font-weight: 600; padding: 2px 6px; border-radius: 4px;">
+                                {conf:.0%}
+                            </span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # ปุ่มเพิ่มรายการขาด / ผิดตำแหน่งเข้า Checklist
+        problem_slots = [s for s in summary.slot_results if s["status"] in ("missing", "misplaced", "recheck")]
+        if problem_slots:
+            btn_label = f"➕ เพิ่ม {len(problem_slots)} รายการที่พบปัญหาเข้า Checklist"
+            if st.button(btn_label, use_container_width=True, type="primary", key="tray_add_problems_btn"):
+                existing_names = [x['name'] for x in st.session_state.detected_list]
                 added = 0
-                for r in missing:
-                    if r['filename'] not in existing_files:
+                for s in problem_slots:
+                    item_name = s.get("item_name") or f"ช่อง #{s['slot_number']}"
+                    if item_name not in existing_names:
                         st.session_state.detected_list.append({
-                            "filename":    r['filename'],
-                            "name":        r['name'],
-                            "category":    r['category'],
-                            "description": r.get('description', '-'),
-                            "score":       r.get('score', 0),
-                            "checked":     False
+                            "filename": f"{s['slot_number']}.png",
+                            "name": item_name,
+                            "category": "ถาด 70 รายการ",
+                            "description": f"สถานะจากถาด: {s['status']} ({s.get('reason', '')})",
+                            "score": int(s.get("confidence", 0.0) * 100),
+                            "checked": False
                         })
                         added += 1
-                st.session_state.tray_check_results = None
-                st.session_state.tray_check_data    = None
-                st.session_state.active_view        = "checklist"
+
+                st.session_state.active_view = "checklist"
                 st.rerun()
 
         # ตัวเลือกเพิ่มเติม
         with st.expander("⚙️ ตัวเลือกเพิ่มเติม"):
-            if st.button("ลบ Template นี้",
-                         key="tray_delete_btn", type="secondary"):
-                scanner.delete_tray_template(selected_id)
-                st.session_state.tray_check_results = None
-                st.session_state.tray_check_data    = None
-                st.success("ลบ Template สำเร็จ")
-                st.rerun()
+            c_del1, c_del2 = st.columns(2)
+            with c_del1:
+                if st.button("ล้างผลการสแกนนี้", use_container_width=True):
+                    st.session_state.tray_check_summary = None
+                    st.rerun()
+            with c_del2:
+                if st.button("ลบ Template ถาดนี้", key="tray_delete_btn", type="secondary", use_container_width=True):
+                    scanner.delete_tray_template(selected_id)
+                    st.session_state.tray_check_summary = None
+                    st.success("ลบ Template สำเร็จ")
+                    st.rerun()
+
 
 
 def render_tray():
