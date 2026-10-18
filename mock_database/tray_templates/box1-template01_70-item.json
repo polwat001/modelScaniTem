@@ -1,7 +1,7 @@
 {
-  "tray_id": "TRAY_YA_1_2",
-  "tray_name": "ถาดเครื่องมือ YA 1/2 (ครบ 70 ช่อง)",
-  "description": "ถาดโฟมเครื่องมือช่าง YA 1/2 พร้อมตำแหน่งและพิกัด Polygon จาก Mask แม่นยำ",
+  "tray_id": "box1-template01_70-item",
+  "tray_name": "box1-template01_70-item",
+  "description": "ถาดโฟมเครื่องมือชุด box1-template01_70-item พร้อมตำแหน่งและพิกัด Polygon จาก Mask แม่นยำ",
   "version": "2.1.0",
   "image_size": [
     1448,
@@ -11,8 +11,8 @@
   "image_height": 1086,
   "slot_count": 69,
   "total_slots": 69,
-  "reference_image": "admin_data/tray_refs/TRAY_YA_1_2.jpg",
-  "sketch_image": "admin_data/tray_refs/TRAY_YA_1_2_sketch.png",
+  "reference_image": "admin_data/tray_refs/box1-template01_70-item.jpg",
+  "sketch_image": "admin_data/tray_refs/box1-template01_70-item_sketch.png",
   "slots": [
     {
       "slot_number": 1,
