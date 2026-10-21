@@ -15,12 +15,15 @@ Slot Status:
 """
 
 from .quality_gate import ImageQualityGate
+from .tray_cropper import TrayBoxCropper, TrayCropResult
 from .aligner import TrayAligner
 from .slot_checker import SlotChecker
 from .aggregator import ScanAggregator, generate_tray_guide_overlay
 
 __all__ = [
     "ImageQualityGate",
+    "TrayBoxCropper",
+    "TrayCropResult",
     "TrayAligner",
     "SlotChecker",
     "ScanAggregator",

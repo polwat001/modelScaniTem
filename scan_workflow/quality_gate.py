@@ -84,7 +84,14 @@ class ImageQualityGate:
         issues: list[str] = []
 
         # ── 1. ความคมชัด ──────────────────────────────────────────────────────
-        blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        # ทำการ Normalize ขนาดภาพไม่เกิน 1000px เพื่อให้ค่า Laplacian Variance สม่ำเสมอ ไม่ผันผวนตาม Resolution 4K/Full HD
+        blur_scale = min(1.0, 1000.0 / max(w, h)) if max(w, h) > 1000 else 1.0
+        if blur_scale < 1.0:
+            gray_for_blur = cv2.resize(gray, (int(w * blur_scale), int(h * blur_scale)), interpolation=cv2.INTER_AREA)
+        else:
+            gray_for_blur = gray
+
+        blur_score = float(cv2.Laplacian(gray_for_blur, cv2.CV_64F).var())
         if blur_score < self.min_blur_score:
             issues.append(f"ภาพเบลอ (คะแนน {blur_score:.0f} < {self.min_blur_score:.0f}) กรุณาถ่ายใหม่ให้นิ่ง")
 

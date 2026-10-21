@@ -1086,8 +1086,11 @@ def render_tray_check():
     ref_img_path = Path(f"admin_data/tray_refs/{selected_id}.jpg")
     if not ref_img_path.exists():
         ref_img_path = Path(f"admin_data/tray_refs/{selected_id}.png")
-    if not ref_img_path.exists() and selected_id == "TRAY_YA_1_2":
-        ref_img_path = Path("test_verified.jpg")
+    if not ref_img_path.exists():
+        for fallback in [Path("sample_images/test_verified.jpg"), Path("test_verified.jpg")]:
+            if fallback.exists():
+                ref_img_path = fallback
+                break
 
     ref_img = cv2.imread(str(ref_img_path)) if ref_img_path.exists() else None
 
@@ -1213,6 +1216,42 @@ def render_tray_check():
 
         st.progress(pct / 100)
 
+        # แจ้งเตือนข้อผิดพลาดหรือถ่ายไกลเกินไป (Distance Guard)
+        if summary.error_message:
+            st.markdown(f"""
+            <div style="background: #FFF2F2; border: 2px solid #E81D23; border-radius: 8px;
+                        padding: 12px 16px; margin: 12px 0;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 1.4rem;">⚠️</span>
+                    <strong style="color: #E81D23; font-size: 1rem;">ไม่สามารถตรวจสอบถาดได้:</strong>
+                </div>
+                <p style="color: #2C2C2C; margin: 6px 0 0 32px; font-size: 0.90rem;">{summary.error_message}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            return
+
+        # แสดงกล่องสถานะ Auto-Crop & Distance
+        if summary.crop:
+            crop_info = summary.crop
+            c_ratio = crop_info.area_ratio
+            if c_ratio >= 0.50:
+                c_badge_bg = "#E8F7ED"
+                c_badge_border = "#1E9E40"
+                c_badge_color = "#1E9E40"
+                c_status_text = f"✅ ระยะถ่ายดีเยี่ยม: ตัวถาดกินพื้นที่ {c_ratio:.0%} ของภาพ (Auto-Crop สำเร็จ)"
+            else:
+                c_badge_bg = "#FFF9E6"
+                c_badge_border = "#D4A000"
+                c_badge_color = "#B57000"
+                c_status_text = f"ℹ️ ถ่ายค่อนข้างห่าง: ตัวถาดกินพื้นที่ {c_ratio:.0%} (ระบบทำการ Auto-Crop ซูมระนาบ 90° ให้อัตโนมัติ)"
+
+            st.markdown(f"""
+            <div style="background: {c_badge_bg}; border: 1.5px solid {c_badge_border}; border-radius: 6px;
+                        padding: 6px 12px; margin: 8px 0; font-size: 0.82rem; color: {c_badge_color};">
+                <strong>✂️ การตรวจจับและตัดขอบถาด:</strong> {c_status_text}
+            </div>
+            """, unsafe_allow_html=True)
+
         if summary.is_complete:
             st.markdown("""
             <div style="background: #E8F7ED; border: 2px solid #1E9E40; border-radius: 8px;
@@ -1232,9 +1271,10 @@ def render_tray_check():
             </div>
             """, unsafe_allow_html=True)
 
-        # ภาพผลลัพธ์แบบสลับแท็บ
-        tab_anno, tab_orig, tab_wire = st.tabs([
+        # ภาพผลลัพธ์แบบสลับ 4 แท็บ (เพิ่มแท็บภาพหลัง Crop)
+        tab_anno, tab_crop, tab_orig, tab_wire = st.tabs([
             "🖼️ ภาพพร้อมผลการตรวจ (Annotated)",
+            "✂️ ภาพตัดขอบถาด (Cropped & Rectified)",
             "📷 ภาพถ่ายต้นฉบับ (Original)",
             "📐 ภาพร่างไกด์ (Template Blueprint)"
         ])
@@ -1244,15 +1284,22 @@ def render_tray_check():
                 st.image(summary.annotated_image, channels="BGR", use_container_width=True,
                          caption=f"ผลการตรวจสอบถาด: 🟢 {correct}  🔴 {missing}  🟡 {misplaced}  ↩️ {recheck}")
 
+        with tab_crop:
+            if summary.crop and summary.crop.cropped_image is not None:
+                st.image(summary.crop.cropped_image, channels="BGR", use_container_width=True,
+                         caption=f"ภาพตัดขอบถาดและปรับระนาบ (Perspective Rectified): ขนาด {summary.crop.cropped_image.shape[1]}x{summary.crop.cropped_image.shape[0]} px")
+            else:
+                st.info("ใช้ภาพเต็มเฟรมโดยตรง (ไม่มีการตัดขอบ)")
+
         with tab_orig:
             orig_img = st.session_state.get('tray_check_input_img')
             if orig_img is not None:
-                st.image(orig_img, channels="BGR", use_container_width=True, caption="ภาพถ่ายต้นฉบับ")
+                st.image(orig_img, channels="BGR", use_container_width=True, caption="ภาพถ่ายต้นฉบับก่อนตัดขอบ")
 
         with tab_wire:
             if tray_data and slots:
                 wire = generate_tray_guide_overlay(tray_data, width=1024, height=768)
-                st.image(wire, channels="BGR", use_container_width=True, caption="โครงสร้าง 70 ช่องต้นแบบ")
+                st.image(wire, channels="BGR", use_container_width=True, caption="โครงสร้างช่องต้นแบบ")
 
         # รายการแยกแต่ละช่องพร้อมฟิลเตอร์
         st.markdown("<h4 style='font-size: 15px; margin: 14px 0 6px 0; color: #2C2C2C;'>รายละเอียดแต่ละช่อง:</h4>", unsafe_allow_html=True)

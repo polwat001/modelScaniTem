@@ -28,6 +28,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .quality_gate import ImageQualityGate, QualityResult
+from .tray_cropper import TrayBoxCropper, TrayCropResult
 from .aligner import TrayAligner, AlignResult
 from .slot_checker import SlotChecker, SlotResult
 
@@ -91,6 +92,7 @@ class ScanSummary:
     annotated_image: Optional[np.ndarray]  # ภาพพร้อมกรอบสี
     quality: Optional[QualityResult]
     align: Optional[AlignResult]
+    crop: Optional[TrayCropResult] = None   # ผลการตรวจจับขอบเขตและตัดถาด
     error_message: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,8 +133,10 @@ class ScanAggregator:
         self,
         tray_refs_dir: str = "admin_data/tray_refs",
         quality_gate: Optional[ImageQualityGate] = None,
+        cropper: Optional[TrayBoxCropper] = None,
     ):
         self.quality_gate = quality_gate or ImageQualityGate()
+        self.cropper = cropper or TrayBoxCropper()
         self.aligner = TrayAligner(tray_refs_dir=tray_refs_dir)
         self.checker = SlotChecker()
 
@@ -190,20 +194,21 @@ class ScanAggregator:
         self._ready = True
         return True
 
-    def scan(self, image: np.ndarray, skip_quality: bool = False) -> ScanSummary:
+    def scan(self, image: np.ndarray, skip_quality: bool = False, skip_crop: bool = False) -> ScanSummary:
         """
         รัน full pipeline และส่งคืน ScanSummary
 
         Args:
             image        : ภาพจากกล้องมือถือหรืออัปโหลด (BGR)
             skip_quality : ถ้า True จะข้าม quality gate (สำหรับ debug/ทดสอบ)
+            skip_crop    : ถ้า True จะข้าม auto-crop (สำหรับ debug/ทดสอบ)
 
         Returns:
             ScanSummary — ผลสรุปพร้อม annotated_image
         """
         tray_id = self._tray_id or "unknown"
 
-        def _empty_summary(msg: str, q=None, a=None) -> ScanSummary:
+        def _empty_summary(msg: str, q=None, a=None, c=None) -> ScanSummary:
             return ScanSummary(
                 tray_id=tray_id,
                 is_complete=False,
@@ -216,6 +221,7 @@ class ScanAggregator:
                 annotated_image=image.copy() if image is not None else None,
                 quality=q,
                 align=a,
+                crop=c,
                 error_message=msg,
             )
 
@@ -227,19 +233,30 @@ class ScanAggregator:
                 issues_str = " | ".join(quality_result.issues)
                 return _empty_summary(f"คุณภาพภาพไม่ผ่าน: {issues_str}", q=quality_result)
 
+        # ── Step 0.5 & 0.6: Tray Detection, Distance Guard & Auto-Crop ───────
+        crop_result = None
+        working_image = image
+
+        if not skip_crop:
+            crop_result = self.cropper.detect_and_crop(image, target_size=(1448, 1086))
+            if crop_result.is_too_far:
+                return _empty_summary(crop_result.message, q=quality_result, c=crop_result)
+            if crop_result.success and crop_result.cropped_image is not None:
+                working_image = crop_result.cropped_image
+                logger.info(f"Auto-Crop: {crop_result.message}")
+
         # ── Step 1: Alignment ────────────────────────────────────────────────
         align_result = None
-        working_image = image  # ถ้า align ไม่ได้ จะใช้ภาพดิบ
 
         if self._ready and self._tray_id:
-            align_result = self.aligner.align(image, self._tray_id)
+            align_result = self.aligner.align(working_image, self._tray_id)
             if align_result.success and align_result.aligned_image is not None:
                 working_image = align_result.aligned_image
                 logger.info(f"Align: {align_result.message}")
             else:
-                logger.warning(f"Align ไม่สำเร็จ — ใช้ภาพดิบแทน: {align_result.message}")
+                logger.warning(f"Align ไม่สำเร็จ — ใช้ภาพ Cropped/ดิบแทน: {align_result.message}")
         else:
-            logger.warning("ScanAggregator ยังไม่ได้ setup() หรือไม่มี reference image — ใช้ภาพดิบ")
+            logger.warning("ScanAggregator ยังไม่ได้ setup() หรือไม่มี reference image — ใช้ภาพ Cropped/ดิบ")
 
         # ── Step 2–4: ตรวจแต่ละช่อง ─────────────────────────────────────────
         slot_results: list[SlotResult] = self.checker.check_all_slots(working_image, self._slots)
@@ -272,6 +289,7 @@ class ScanAggregator:
             annotated_image=annotated,
             quality=quality_result,
             align=align_result,
+            crop=crop_result,
         )
 
     # ──────────────────────────────────────────────────────────────────────────
