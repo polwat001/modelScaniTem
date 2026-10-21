@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class AlignResult:
-    __slots__ = ("success", "aligned_image", "homography", "match_count", "message", "inlier_ratio")
+    __slots__ = ("success", "aligned_image", "homography", "match_count", "message", "inlier_ratio", "rotation_applied")
 
     def __init__(
         self,
@@ -34,6 +34,7 @@ class AlignResult:
         match_count: int,
         inlier_ratio: float,
         message: str,
+        rotation_applied: int = 0,
     ):
         self.success = success
         self.aligned_image = aligned_image
@@ -41,12 +42,14 @@ class AlignResult:
         self.match_count = match_count
         self.inlier_ratio = inlier_ratio
         self.message = message
+        self.rotation_applied = rotation_applied
 
     def to_dict(self) -> dict:
         return {
             "success": self.success,
             "match_count": self.match_count,
             "inlier_ratio": round(self.inlier_ratio, 3),
+            "rotation_applied": self.rotation_applied,
             "message": self.message,
             "has_homography": self.homography is not None,
         }
@@ -141,14 +144,14 @@ class TrayAligner:
 
     def align(self, query_image: np.ndarray, tray_id: str) -> AlignResult:
         """
-        ปรับแนวภาพถ่ายให้ตรงกับ template reference
+        ปรับแนวภาพถ่ายให้ตรงกับ template reference (รองรับทั้งภาพแนวตั้ง แนวนอน และกลับหัวอัตโนมัติ)
 
         Args:
-            query_image : ภาพจากกล้องมือถือ (BGR)
-            tray_id     : รหัสถาด เช่น "TRAY_YA_1_2"
+            query_image : ภาพจากกล้องมือถือหรือครอปแล้ว (BGR)
+            tray_id     : รหัสถาด เช่น "box1-template01_70-item"
 
         Returns:
-            AlignResult — ถ้า success=True จะมี aligned_image และ homography
+            AlignResult — ถ้า success=True จะมี aligned_image, homography และ rotation_applied
         """
         if not self.load_reference(tray_id):
             return AlignResult(
@@ -162,67 +165,87 @@ class TrayAligner:
 
         ref_img, ref_kp, ref_des = self._ref_cache[tray_id]
         h_ref, w_ref = ref_img.shape[:2]
+        h_q, w_q = query_image.shape[:2]
 
-        # ดึง features จากภาพถ่าย
-        query_kp, query_des = self._extract_features(query_image)
-        if query_des is None or len(query_kp) < self.MIN_MATCHES:
-            return AlignResult(
-                success=False,
-                aligned_image=None,
-                homography=None,
-                match_count=len(query_kp),
-                inlier_ratio=0.0,
-                message="ภาพมี feature น้อยเกินไป กรุณาถ่ายให้เห็นถาดชัดและแสงสม่ำเสมอ",
+        # ── ตัดสินใจลำดับมุมหมุนตาม Aspect Ratio ──
+        # ถ้า query เป็นแนวตั้ง (H > W) แต่ ref เป็นแนวนอน (W > H) ให้ทดลอง 90° และ 270° ก่อน
+        is_query_portrait = h_q > w_q
+        is_ref_landscape = w_ref >= h_ref
+
+        if is_query_portrait and is_ref_landscape:
+            candidate_angles = [90, 270, 0, 180]
+        elif (not is_query_portrait) and (not is_ref_landscape):
+            candidate_angles = [90, 270, 0, 180]
+        else:
+            candidate_angles = [0, 180, 90, 270]
+
+        best_res: Optional[AlignResult] = None
+        best_inliers = -1
+
+        for angle in candidate_angles:
+            # หมุนภาพ query ตามมุม
+            if angle == 90:
+                rotated_query = cv2.rotate(query_image, cv2.ROTATE_90_CLOCKWISE)
+            elif angle == 180:
+                rotated_query = cv2.rotate(query_image, cv2.ROTATE_180)
+            elif angle == 270:
+                rotated_query = cv2.rotate(query_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            else:
+                rotated_query = query_image
+
+            # ดึง features จากภาพ query
+            query_kp, query_des = self._extract_features(rotated_query)
+            if query_des is None or len(query_kp) < self.MIN_MATCHES:
+                continue
+
+            # Match features
+            good_matches, _ = self._match_features(ref_des, query_des)
+            if len(good_matches) < self.MIN_MATCHES:
+                continue
+
+            # คำนวณ Homography
+            H, mask, inlier_ratio = self._compute_homography(ref_kp, query_kp, good_matches)
+            if H is None or inlier_ratio < self.MIN_INLIER_RATIO:
+                continue
+
+            inlier_count = int(mask.sum()) if mask is not None else len(good_matches)
+
+            # ตรวจสอบความถูกต้องของมุมนี้
+            if inlier_count > best_inliers:
+                aligned = cv2.warpPerspective(rotated_query, H, (w_ref, h_ref))
+                rot_msg = f" (หมุนภาพ {angle}° อัตโนมัติ)" if angle != 0 else ""
+                best_res = AlignResult(
+                    success=True,
+                    aligned_image=aligned,
+                    homography=H,
+                    match_count=inlier_count,
+                    inlier_ratio=inlier_ratio,
+                    rotation_applied=angle,
+                    message=f"ปรับแนวสำเร็จ{rot_msg} ({inlier_count} จุดตรงกัน, {inlier_ratio:.0%} inliers)",
+                )
+                best_inliers = inlier_count
+
+                # ถ้า inlier สูงมาก (≥ 40 จุด) ถือว่ามั่นใจมาก หยุดลูปได้ทันที
+                if inlier_count >= 40:
+                    break
+
+        if best_res is not None:
+            logger.info(
+                f"TrayAligner: align สำเร็จ — {best_res.match_count} inliers, "
+                f"rot={best_res.rotation_applied}°, ratio={best_res.inlier_ratio:.0%}"
             )
+            return best_res
 
-        # Match features
-        good_matches, total_matches = self._match_features(ref_des, query_des)
-
-        if len(good_matches) < self.MIN_MATCHES:
-            return AlignResult(
-                success=False,
-                aligned_image=None,
-                homography=None,
-                match_count=len(good_matches),
-                inlier_ratio=0.0,
-                message=(
-                    f"Match ได้ {len(good_matches)} จุด (ต้องการ ≥ {self.MIN_MATCHES}) "
-                    f"— กรุณาเล็งให้เห็นถาดชัดกว่านี้"
-                ),
-            )
-
-        # คำนวณ Homography
-        H, mask, inlier_ratio = self._compute_homography(ref_kp, query_kp, good_matches)
-
-        if H is None or inlier_ratio < self.MIN_INLIER_RATIO:
-            return AlignResult(
-                success=False,
-                aligned_image=None,
-                homography=None,
-                match_count=len(good_matches),
-                inlier_ratio=inlier_ratio,
-                message=(
-                    f"Homography ไม่เสถียร (inlier ratio {inlier_ratio:.0%}) "
-                    f"— กรุณาถ่ายใหม่ให้ถาดเต็มเฟรม"
-                ),
-            )
-
-        # Warp ภาพถ่ายให้ตรงกับขนาด reference
-        aligned = cv2.warpPerspective(query_image, H, (w_ref, h_ref))
-
-        inlier_count = int(mask.sum()) if mask is not None else len(good_matches)
-        logger.info(
-            f"TrayAligner: align สำเร็จ — {inlier_count} inliers, "
-            f"ratio={inlier_ratio:.0%}, output={w_ref}×{h_ref}px"
-        )
-
+        # กรณี match ไม่ผ่านทุกมุม
+        rot_hint = " (ลองถือโทรศัพท์แนวนอนและให้ถาดเต็มเฟรม)" if is_query_portrait else ""
         return AlignResult(
-            success=True,
-            aligned_image=aligned,
-            homography=H,
-            match_count=inlier_count,
-            inlier_ratio=inlier_ratio,
-            message=f"ปรับแนวสำเร็จ ({inlier_count} จุดตรงกัน, {inlier_ratio:.0%} inliers)",
+            success=False,
+            aligned_image=None,
+            homography=None,
+            match_count=0,
+            inlier_ratio=0.0,
+            rotation_applied=0,
+            message=f"ไม่สามารถปรับแนวภาพได้ จุดอ้างอิงตรงกันน้อยเกินไป{rot_hint}",
         )
 
     def get_reference_image(self, tray_id: str) -> Optional[np.ndarray]:

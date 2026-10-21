@@ -4,6 +4,9 @@ import numpy as np
 import json
 import os
 import time
+import io
+from typing import Optional
+from PIL import Image, ImageOps
 from scanner_module import ShapeScanner
 from scan_workflow import ScanAggregator, ImageQualityGate, generate_tray_guide_overlay
 
@@ -561,6 +564,22 @@ def keep_only_checked_items():
 
 # ==========================================
 
+def load_image_with_exif(img_file) -> Optional[np.ndarray]:
+    """
+    อ่านภาพจาก Streamlit UploadedFile / CameraInput พร้อมปรับ EXIF orientation อัตโนมัติ
+    เพื่อป้องกันภาพกลับด้านหรือหมุน 90 องศาเมื่อถ่ายจากโทรศัพท์มือถือ / iPad
+    """
+    if img_file is None:
+        return None
+    try:
+        raw_bytes = img_file.getvalue()
+        pil_img = Image.open(io.BytesIO(raw_bytes))
+        pil_img = ImageOps.exif_transpose(pil_img)
+        rgb_arr = np.array(pil_img.convert("RGB"))
+        return cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return cv2.imdecode(np.frombuffer(img_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+
 @st.cache_resource
 def load_scanner():
     if not os.path.exists('mock_database'): os.makedirs('mock_database')
@@ -712,11 +731,11 @@ def render_scanner():
         st.caption("คำแนะนำ: ถือ iPad หรือมือถือขนานกับโต๊ะ วางเครื่องมือไม่ซ้อนทับกัน")
         img_file = st.camera_input("ถ่ายภาพเครื่องมือ", key="cam_input", on_change=keep_only_checked_items)
         if img_file:
-            opencv_img = cv2.imdecode(np.frombuffer(img_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+            opencv_img = load_image_with_exif(img_file)
     elif input_method == "Upload Image":
         img_file = st.file_uploader("อัปโหลดภาพเครื่องมือ", type=['jpg','png'], key="file_input", on_change=keep_only_checked_items)
         if img_file:
-            opencv_img = cv2.imdecode(np.frombuffer(img_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+            opencv_img = load_image_with_exif(img_file)
 
     if opencv_img is not None:
         viz_img = None
@@ -990,7 +1009,7 @@ def render_tray_register():
                                     key="tray_reg_file")
 
     if img_file:
-        opencv_img = cv2.imdecode(np.frombuffer(img_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        opencv_img = load_image_with_exif(img_file)
         st.image(opencv_img, channels="BGR", caption="ภาพถาดที่จะลงทะเบียน", use_container_width=True)
 
     if opencv_img is not None:
@@ -1095,7 +1114,7 @@ def render_tray_check():
     ref_img = cv2.imread(str(ref_img_path)) if ref_img_path.exists() else None
 
     # ภาพร่างนำทางการเล็ง (Camera Alignment Guide Overlay)
-    st.markdown("""
+    st.markdown(f"""
     <div style="background: linear-gradient(135deg, #242A33 0%, #171B21 100%); border: 1.5px solid #00D2FF;
                 border-radius: 8px; padding: 10px 14px; margin: 10px 0 14px 0; color: #FFFFFF;">
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
@@ -1109,8 +1128,7 @@ def render_tray_check():
             </span>
         </div>
         <p style="margin: 6px 0 0 0; color: #C7C7C7; font-size: 0.82rem; line-height: 1.4;">
-            เล็งกล้องมือถือ/iPad จากมุมตั้งฉาก ให้ขอบถาดจริงตรงกับเส้นกรอบด้านล่าง เพื่อให้ระบบวิเคราะห์ทั้ง 70 ช่องได้อย่างแม่นยำ
-            (ส่วนอัปโหลดไฟล์มีไว้เพื่อทดสอบระบบ)
+            เล็งกล้องมือถือ/iPad จากมุมมองด้านบน ให้เห็นขอบถาดครบทั้ง 4 ด้าน เพื่อให้ระบบวิเคราะห์ช่องเครื่องมือทั้ง {len(slots)} ช่องได้อย่างแม่นยำ
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -1119,7 +1137,17 @@ def render_tray_check():
         if tray_data and slots:
             guide_img = generate_tray_guide_overlay(tray_data, width=1024, height=768)
             st.image(guide_img, channels="BGR", use_container_width=True,
-                     caption=f"โครงร่างตำแหน่ง 70 ช่องของ {tray_data.get('tray_name')}")
+                     caption=f"โครงร่างตำแหน่ง {len(slots)} ช่องของ {tray_data.get('tray_name')}")
+
+    # แนะนำการถ่ายภาพสำหรับมือถือ / iPad
+    st.markdown("""
+    <div style="background: #F0F4FF; border: 1.5px solid #2B6CB0; border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 0.84rem; color: #1A365D; display: flex; align-items: center; gap: 8px;">
+        <span style="font-size: 1.25rem;">📱</span>
+        <div>
+            <strong>คำแนะนำการถ่ายภาพ:</strong> ควรถือมือถือหรือ iPad <strong>แนวนอน (Landscape)</strong> ขนานกับถาด โดยให้เห็นขอบถาดครบทั้ง 4 ด้าน <em>(ระบบมี AI ตรวจจับทิศทางและหมุนปรับองศาอัตโนมัติหากถ่ายแนวตั้ง)</em>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # วิธีการนำเข้าภาพ
     input_method = st.radio("เลือกวิธีถ่าย/ทดสอบ:",
@@ -1133,7 +1161,7 @@ def render_tray_check():
                                     type=['jpg', 'png', 'jpeg'], key="tray_check_file")
 
     if img_file:
-        opencv_img = cv2.imdecode(np.frombuffer(img_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        opencv_img = load_image_with_exif(img_file)
 
     # Quality Gate & ปุ่มตรวจสอบ
     if opencv_img is not None:
@@ -1164,9 +1192,9 @@ def render_tray_check():
             </div>
             """, unsafe_allow_html=True)
 
-        if st.button("🔍 ตรวจสอบถาดเครื่องมือครบ 70 ช่อง (Inspect Tray)",
+        if st.button(f"🔍 ตรวจสอบถาดเครื่องมือครบ {len(slots)} ช่อง (Inspect Tray)",
                      type="primary", use_container_width=True, key="tray_check_btn"):
-            with st.spinner("กำลังปรับแนวภาพและตรวจสอบช่องเครื่องมือทั้ง 70 รายการ..."):
+            with st.spinner(f"กำลังปรับแนวภาพและตรวจสอบช่องเครื่องมือทั้ง {len(slots)} รายการ..."):
                 agg = ScanAggregator(tray_refs_dir="admin_data/tray_refs")
                 agg.setup(tray_data, reference_image=ref_img)
                 summary = agg.scan(opencv_img, skip_quality=False)
@@ -1249,6 +1277,16 @@ def render_tray_check():
             <div style="background: {c_badge_bg}; border: 1.5px solid {c_badge_border}; border-radius: 6px;
                         padding: 6px 12px; margin: 8px 0; font-size: 0.82rem; color: {c_badge_color};">
                 <strong>✂️ การตรวจจับและตัดขอบถาด:</strong> {c_status_text}
+            </div>
+            """, unsafe_allow_html=True)
+
+        # แสดงกล่องสถานะ Auto-Orientation (ถ้ามีการหมุนภาพ)
+        if summary.align and getattr(summary.align, "rotation_applied", 0) > 0:
+            deg = summary.align.rotation_applied
+            st.markdown(f"""
+            <div style="background: #EBF8FF; border: 1.5px solid #3182CE; border-radius: 6px;
+                        padding: 6px 12px; margin: 8px 0; font-size: 0.82rem; color: #2B6CB0;">
+                <strong>🔄 ปรับทิศทางภาพอัตโนมัติ:</strong> ตรวจพบภาพถ่ายแนวตั้ง/หมุน ระบบหมุนปรับระนาบ {deg}° ให้อัตโนมัติเพื่อให้ตรงกับโครงสร้างถาดต้นแบบ
             </div>
             """, unsafe_allow_html=True)
 
@@ -1414,7 +1452,7 @@ def render_tray():
     <div style="border-left:4px solid #E81D23;padding-left:10px;margin-bottom:10px;">
         <h3 style="margin:0;color:#2C2C2C;font-size:18px;">จัดการถาดเครื่องมือ</h3>
         <p style="margin:2px 0 0 0;color:#525252;font-size:12px;">
-            บันทึกตำแหน่งและความสว่างของแต่ละช่อง ตรวจสอบได้ทันที (ไม่ใช้ SIFT)
+            ระบบตรวจนับและสแกนถาดเครื่องมืออัตโนมัติด้วย AI (Auto-Orientation, Auto-Crop & Homography Alignment)
         </p>
     </div>
     """, unsafe_allow_html=True)

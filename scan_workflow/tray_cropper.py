@@ -148,7 +148,11 @@ class TrayBoxCropper:
             # ใช้ภาพทั้งภาพ ถือว่าถาดเต็มจอ 100%
             out_img = image
             if target_size is not None:
-                out_img = cv2.resize(image, target_size, interpolation=cv2.INTER_LANCZOS4)
+                tw, th = target_size
+                # สลับมิติถ้าภาพกับ target_size มีทิศทางตรงกันข้าม เพื่อรักษาสัดส่วน
+                if (w_orig > h_orig and th > tw) or (h_orig > w_orig and tw > th):
+                    tw, th = th, tw
+                out_img = cv2.resize(image, (tw, th), interpolation=cv2.INTER_LANCZOS4)
             return TrayCropResult(
                 success=True,
                 cropped_image=out_img,
@@ -196,18 +200,25 @@ class TrayBoxCropper:
             )
 
         # 7. ทำ Perspective Warp
-        if target_size is not None:
-            dst_w, dst_h = target_size
-        else:
-            # คำนวณความกว้างและความสูงตามขนาดของ 4 จุด
-            tl, tr, br, bl = ordered_pts
-            width_a = np.linalg.norm(br - bl)
-            width_b = np.linalg.norm(tr - tl)
-            dst_w = int(max(width_a, width_b))
+        tl, tr, br, bl = ordered_pts
+        width_a = np.linalg.norm(br - bl)
+        width_b = np.linalg.norm(tr - tl)
+        calc_w = int(max(width_a, width_b))
 
-            height_a = np.linalg.norm(tr - br)
-            height_b = np.linalg.norm(tl - bl)
-            dst_h = int(max(height_a, height_b))
+        height_a = np.linalg.norm(tr - br)
+        height_b = np.linalg.norm(tl - bl)
+        calc_h = int(max(height_a, height_b))
+
+        if target_size is not None:
+            tw, th = target_size
+            # ถ้ากล่องถาดเป็นแนวตั้ง (calc_h > calc_w) แต่ target_size เป็นแนวนอน (tw > th)
+            # ให้สลับมิติเพื่อคงสัดส่วนที่ถูกต้อง ป้องกัน SIFT keypoints ผิดรูป
+            if (calc_h > calc_w and tw > th) or (calc_w > calc_h and th > tw):
+                dst_w, dst_h = th, tw
+            else:
+                dst_w, dst_h = tw, th
+        else:
+            dst_w, dst_h = calc_w, calc_h
 
         dst_pts = np.array([
             [0, 0],

@@ -91,6 +91,8 @@ class SlotChecker:
         # ref_mode: "golden" (ภาพถาดที่มีเครื่องมือครบ — default) หรือ "empty" (ถาดว่างเปล่า)
         self.ref_mode = ref_mode
         self._refs: dict[int, np.ndarray] = {}
+        # CLAHE สำหรับลดแสงสะท้อนจ้า (Specular Glare) บนผิวโลหะชุบโครเมียม
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     # ──────────────────────────────────────────────────────────────────────────
     # Setup
@@ -306,9 +308,11 @@ class SlotChecker:
         Returns:
             (is_occupied, confidence, reason)
         """
+        # ปรับ contrast ด้วย CLAHE เพื่อดึงขอบโลหะและลดผลกระทบจากแสงสะท้อนจ้า (specular glare)
+        slot_enhanced = self._clahe.apply(slot_gray)
         std_val = float(np.std(slot_gray))
         mean_val = float(np.mean(slot_gray))
-        edges = cv2.Canny(slot_gray, 40, 120)
+        edges = cv2.Canny(slot_enhanced, 40, 120)
         edge_density = float(np.count_nonzero(edges)) / float(max(1, slot_gray.size))
 
         # ── คำนวณความคล้ายกับ ref_crop (ถ้ามี) ──
@@ -386,7 +390,9 @@ class SlotChecker:
         detail["sim_score"] = sim_score
 
         # ── หา contour หลักของวัตถุ ──────────────────────────────────────────
-        blur = cv2.GaussianBlur(slot_gray, (5, 5), 0)
+        # ใช้ CLAHE ช่วยปรับ localized contrast บนผิวโลหะก่อน Gaussian Blur และ Adaptive Threshold
+        enhanced_slot = self._clahe.apply(slot_gray)
+        blur = cv2.GaussianBlur(enhanced_slot, (5, 5), 0)
         thresh = cv2.adaptiveThreshold(
             blur, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
