@@ -186,7 +186,7 @@ def render_tray_manager(current_user: dict):
         col_t_def, col_t_up = st.columns(2)
         with col_t_def:
             st.markdown("##### ⚡ นำเข้าจากโฟลเดอร์ระบบ")
-            st.caption("ระบบพบแม่แบบ เช่น `tray_special_tools_31.json` (31 ช่อง)")
+            st.caption("ระบบพบแม่แบบ เช่น `box2-template01_31-item.json` (41 ช่อง)")
             if st.button("🚀 นำเข้าแม่แบบถาดทั้งหมดจากโฟลเดอร์", use_container_width=True):
                 imported = import_existing_json_trays()
                 if imported > 0:

@@ -1,0 +1,74 @@
+[
+  {
+    "tray_id": "box1-template01_70-item",
+    "total_slots": 69,
+    "landscape": {
+      "matches": 13064,
+      "rotation": 0,
+      "correct": 69,
+      "missing": 0,
+      "misplaced": 0,
+      "recheck": 0,
+      "pct": 100.0,
+      "time_sec": 0.96
+    },
+    "portrait": {
+      "matches": 10950,
+      "rotation": 90,
+      "correct": 69,
+      "missing": 0,
+      "misplaced": 0,
+      "recheck": 0,
+      "pct": 100.0,
+      "time_sec": 0.88
+    }
+  },
+  {
+    "tray_id": "box1-template02_16-item",
+    "total_slots": 17,
+    "landscape": {
+      "matches": 43719,
+      "rotation": 0,
+      "correct": 17,
+      "missing": 0,
+      "misplaced": 0,
+      "recheck": 0,
+      "pct": 100.0,
+      "time_sec": 5.23
+    },
+    "portrait": {
+      "matches": 36478,
+      "rotation": 90,
+      "correct": 17,
+      "missing": 0,
+      "misplaced": 0,
+      "recheck": 0,
+      "pct": 100.0,
+      "time_sec": 4.81
+    }
+  },
+  {
+    "tray_id": "box2-template01_31-item",
+    "total_slots": 41,
+    "landscape": {
+      "matches": 11722,
+      "rotation": 0,
+      "correct": 41,
+      "missing": 0,
+      "misplaced": 0,
+      "recheck": 0,
+      "pct": 100.0,
+      "time_sec": 2.18
+    },
+    "portrait": {
+      "matches": 9429,
+      "rotation": 90,
+      "correct": 41,
+      "missing": 0,
+      "misplaced": 0,
+      "recheck": 0,
+      "pct": 100.0,
+      "time_sec": 2.22
+    }
+  }
+]

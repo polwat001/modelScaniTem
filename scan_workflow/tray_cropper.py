@@ -15,11 +15,11 @@ class TrayCropResult(NamedTuple):
     """ผลลัพธ์จากการตรวจจับและตัดภาพถาด"""
     success: bool
     cropped_image: Optional[np.ndarray]
-    corners: Optional[np.ndarray]          # 4 จุดมุม [TL, TR, BR, BL] ในพิกัดภาพเดิม
-    tray_bbox: Optional[Tuple[int, int, int, int]]  # (x, y, w, h) ในภาพเดิม
-    area_ratio: float                      # สัดส่วนพื้นที่ถาดเทียบกับภาพทั้งหมด (0.0 - 1.0)
-    is_too_far: bool                       # True ถ้าถ่ายไกลเกินไป (area_ratio < min_tray_ratio)
-    message: str
+    corners: Optional[np.ndarray] = None          # 4 จุดมุม [TL, TR, BR, BL] ในพิกัดภาพเดิม
+    tray_bbox: Optional[Tuple[int, int, int, int]] = None  # (x, y, w, h) ในภาพเดิม
+    area_ratio: float = 1.0                      # สัดส่วนพื้นที่ถาดเทียบกับภาพทั้งหมด (0.0 - 1.0)
+    is_too_far: bool = False                       # True ถ้าถ่ายไกลเกินไป (area_ratio < min_tray_ratio)
+    message: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -172,6 +172,18 @@ class TrayBoxCropper:
         # ตรวจสอบว่าถ่ายไกลเกินไปหรือไม่
         is_too_far = area_ratio < self.min_tray_ratio
 
+        # หากถาดกินพื้นที่ >= 70% ของภาพอยู่แล้ว ถือว่าถ่ายได้ระยะดีเยี่ยมเต็มเฟรม ไม่ต้องครอปตัดภาพ
+        if area_ratio >= 0.70:
+            return TrayCropResult(
+                success=True,
+                cropped_image=image,
+                corners=np.array([[0, 0], [w_orig, 0], [w_orig, h_orig], [0, h_orig]], dtype="float32"),
+                tray_bbox=(0, 0, w_orig, h_orig),
+                area_ratio=area_ratio,
+                is_too_far=False,
+                message=f"ภาพถ่ายเต็มเฟรมดีเยี่ยม (ถาดกินพื้นที่ {area_ratio:.0%} ของภาพ) — ใช้งานภาพต้นฉบับคมชัดสูงสุดโดยไม่ต้องตัดขอบ",
+            )
+
         # 5. สกัดจุด 4 มุมของถาด (4-Corner Detection)
         peri = cv2.arcLength(cnt_orig, True)
         approx = cv2.approxPolyDP(cnt_orig, 0.03 * peri, True)
@@ -198,6 +210,14 @@ class TrayBoxCropper:
                 is_too_far=True,
                 message=f"ถ่ายภาพไกลเกินไป: ถาดมีขนาดเพียง {area_ratio:.0%} ของภาพ (เกณฑ์ขั้นต่ำ {self.min_tray_ratio:.0%}) กรุณาขยับกล้องเข้าใกล้ถาดมากขึ้น",
             )
+
+        # 6.5 Safe Padding: ขยายขอบปลอดภัย 8% ออกไปรอบทิศทาง เพื่อป้องกันไม่ให้ตัดโดนเครื่องมือริมขอบ
+        centroid = np.mean(ordered_pts, axis=0)
+        expand_ratio = 1.08
+        expanded_pts = centroid + (ordered_pts - centroid) * expand_ratio
+        expanded_pts[:, 0] = np.clip(expanded_pts[:, 0], 0, w_orig - 1)
+        expanded_pts[:, 1] = np.clip(expanded_pts[:, 1], 0, h_orig - 1)
+        ordered_pts = expanded_pts
 
         # 7. ทำ Perspective Warp
         tl, tr, br, bl = ordered_pts

@@ -551,6 +551,20 @@ if 'tray_check_results' not in st.session_state:
 if 'tray_check_data' not in st.session_state:
     st.session_state.tray_check_data = None
 
+if 'tray_check_summary' not in st.session_state:
+    st.session_state.tray_check_summary = None
+
+if 'tray_check_selected_id' not in st.session_state:
+    st.session_state.tray_check_selected_id = None
+
+if 'tray_check_input_img' not in st.session_state:
+    st.session_state.tray_check_input_img = None
+
+def reset_tray_check_state():
+    """ล้างผลการตรวจสอบถาดเดิมเมื่อมีการเปลี่ยนรูปภาพ ถ่ายใหม่ หรือเปลี่ยนถาด เพื่อไม่ให้ข้อมูลค้าง"""
+    st.session_state.tray_check_summary = None
+    st.session_state.tray_check_input_img = None
+
 # ==========================================
 # ฟังก์ชันจัดการเมื่อมีการเปลี่ยนรูปภาพ
 # ==========================================
@@ -1073,7 +1087,8 @@ def render_tray_check():
     }
     selected_label = st.selectbox("เลือกถาด",
                                    options=list(tray_options.keys()),
-                                   key="tray_check_select")
+                                   key="tray_check_select",
+                                   on_change=reset_tray_check_state)
     selected_id = tray_options[selected_label]
 
     # โหลดไฟล์ Template JSON ของถาดที่เลือก
@@ -1152,13 +1167,18 @@ def render_tray_check():
     # วิธีการนำเข้าภาพ
     input_method = st.radio("เลือกวิธีถ่าย/ทดสอบ:",
                             ["Camera (ถ่ายจากกล้องมือถือ/iPad)", "Upload Image (ทดสอบระบบด้วยไฟล์)"],
-                            horizontal=True, key="tray_check_method")
+                            horizontal=True, key="tray_check_method",
+                            on_change=reset_tray_check_state)
     opencv_img = None
     if "Camera" in input_method:
-        img_file = st.camera_input("ถ่ายภาพถาดปัจจุบัน (จัดมุมมองให้ตรงกับภาพร่าง)", key="tray_check_cam")
+        img_file = st.camera_input("ถ่ายภาพถาดปัจจุบัน (จัดมุมมองให้ตรงกับภาพร่าง)",
+                                   key="tray_check_cam",
+                                   on_change=reset_tray_check_state)
     else:
         img_file = st.file_uploader("อัปโหลดภาพถาดปัจจุบัน (สำหรับทดสอบ)",
-                                    type=['jpg', 'png', 'jpeg'], key="tray_check_file")
+                                    type=['jpg', 'png', 'jpeg'],
+                                    key="tray_check_file",
+                                    on_change=reset_tray_check_state)
 
     if img_file:
         opencv_img = load_image_with_exif(img_file)
@@ -1192,29 +1212,76 @@ def render_tray_check():
             </div>
             """, unsafe_allow_html=True)
 
-        if st.button(f"🔍 ตรวจสอบถาดเครื่องมือครบ {len(slots)} ช่อง (Inspect Tray)",
-                     type="primary", use_container_width=True, key="tray_check_btn"):
+        crop_sel = st.radio(
+            "โหมดการตัดขอบถาด (Crop Mode):",
+            [
+                "🤖 อัตโนมัติ (Smart SIFT-First: ไม่ตัดขอบถ้าภาพชัดเจน)",
+                "🔒 ปิดการตัดขอบ (Original 100% Full Frame)",
+                "✂️ บังคับตัดขอบ (Force Auto-Crop)"
+            ],
+            index=0,
+            horizontal=True,
+            key="tray_crop_mode_radio",
+            on_change=reset_tray_check_state
+        )
+        crop_mode_param = "smart"
+        if "ปิดการตัดขอบ" in crop_sel:
+            crop_mode_param = "off"
+        elif "บังคับตัดขอบ" in crop_sel:
+            crop_mode_param = "force"
+
+        c_scan_btn1, c_scan_btn2 = st.columns([3, 1])
+        with c_scan_btn1:
+            inspect_clicked = st.button(
+                f"🔍 ตรวจสอบถาดเครื่องมือครบ {len(slots)} ช่อง (Inspect Tray)",
+                type="primary", use_container_width=True, key="tray_check_btn"
+            )
+        with c_scan_btn2:
+            reset_clicked = st.button("🔄 ล้างผลสแกน", use_container_width=True, key="tray_check_reset_top_btn", help="ล้างผลการตรวจและเริ่มใหม่")
+
+        if reset_clicked:
+            reset_tray_check_state()
+            st.rerun()
+
+        if inspect_clicked:
             with st.spinner(f"กำลังปรับแนวภาพและตรวจสอบช่องเครื่องมือทั้ง {len(slots)} รายการ..."):
                 agg = ScanAggregator(tray_refs_dir="admin_data/tray_refs")
                 agg.setup(tray_data, reference_image=ref_img)
-                summary = agg.scan(opencv_img, skip_quality=False)
+                summary = agg.scan(opencv_img, skip_quality=False, crop_mode=crop_mode_param)
 
                 st.session_state.tray_check_summary = summary
                 st.session_state.tray_check_selected_id = selected_id
                 st.session_state.tray_check_input_img = opencv_img
                 st.rerun()
 
-    # แสดงผลสรุป 4 สถานะ
+    # แสดงผลสรุป 4 สถานะ (แสดงเมื่อมีรูปภาพปัจจุบันและผลการตรวจตรงกับถาดที่เลือก)
     summary = st.session_state.get('tray_check_summary')
     cached_id = st.session_state.get('tray_check_selected_id')
 
-    if summary and cached_id == selected_id:
+    if summary and cached_id == selected_id and opencv_img is not None:
         total = summary.total_slots
         correct = summary.correct_count
         missing = summary.missing_count
         misplaced = summary.misplaced_count
         recheck = summary.recheck_count
         pct = int((correct / total * 100)) if total > 0 else 0
+
+        # แถบปุ่มจัดการผลลัพธ์ (สแกนซ้ำ / ล้างเพื่อถ่ายใหม่)
+        c_res_act1, c_res_act2 = st.columns([2.5, 1.5])
+        with c_res_act1:
+            if st.button("🔄 ตรวจสอบซ้ำอีกครั้ง (Re-Scan Current Image)", key="tray_rescan_top_btn", type="primary", use_container_width=True):
+                with st.spinner(f"กำลังประมวลผลการตรวจสอบซ้ำทั้ง {len(slots)} ช่อง..."):
+                    agg = ScanAggregator(tray_refs_dir="admin_data/tray_refs")
+                    agg.setup(tray_data, reference_image=ref_img)
+                    new_summary = agg.scan(opencv_img, skip_quality=False, crop_mode=crop_mode_param)
+                    st.session_state.tray_check_summary = new_summary
+                    st.session_state.tray_check_selected_id = selected_id
+                    st.session_state.tray_check_input_img = opencv_img
+                    st.rerun()
+        with c_res_act2:
+            if st.button("🗑️ ล้างผลการตรวจนี้", key="tray_clear_top_btn", use_container_width=True):
+                reset_tray_check_state()
+                st.rerun()
 
         # แผง 4 สถานะ
         st.markdown(f"""

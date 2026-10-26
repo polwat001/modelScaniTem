@@ -194,14 +194,23 @@ class ScanAggregator:
         self._ready = True
         return True
 
-    def scan(self, image: np.ndarray, skip_quality: bool = False, skip_crop: bool = False) -> ScanSummary:
+    def scan(
+        self,
+        image: np.ndarray,
+        skip_quality: bool = False,
+        skip_crop: bool = False,
+        crop_mode: str = "smart",
+    ) -> ScanSummary:
         """
         รัน full pipeline และส่งคืน ScanSummary
 
         Args:
             image        : ภาพจากกล้องมือถือหรืออัปโหลด (BGR)
             skip_quality : ถ้า True จะข้าม quality gate (สำหรับ debug/ทดสอบ)
-            skip_crop    : ถ้า True จะข้าม auto-crop (สำหรับ debug/ทดสอบ)
+            skip_crop    : ถ้า True จะข้าม auto-crop
+            crop_mode    : "smart" (SIFT-First Hybrid: ไม่ตัดขอบถ้าจัดระนาบได้โดยตรง), 
+                           "off" (ปิดการตัดขอบ ใช้ภาพเต็ม 100%), 
+                           "force" (บังคับตัดขอบ auto-crop ก่อนเสมอ)
 
         Returns:
             ScanSummary — ผลสรุปพร้อม annotated_image
@@ -233,30 +242,80 @@ class ScanAggregator:
                 issues_str = " | ".join(quality_result.issues)
                 return _empty_summary(f"คุณภาพภาพไม่ผ่าน: {issues_str}", q=quality_result)
 
-        # ── Step 0.5 & 0.6: Tray Detection, Distance Guard & Auto-Crop ───────
+        # ── Step 0.5 & 1: SIFT-First Hybrid Alignment & Smart Cropping ────────
         crop_result = None
+        align_result = None
         working_image = image
 
-        if not skip_crop:
-            crop_result = self.cropper.detect_and_crop(image, target_size=(1448, 1086))
+        if skip_crop or crop_mode == "off":
+            # ปิดการตัดขอบ — ทำ SIFT Alignment บนภาพเต็มเฟรม 100%
+            crop_result = TrayCropResult(
+                success=True,
+                cropped_image=image,
+                area_ratio=1.0,
+                is_too_far=False,
+                message="ปิดการตัดขอบ (ใช้งานภาพเต็มเฟรม 100%)",
+            )
+            if self._ready and self._tray_id:
+                align_result = self.aligner.align(image, self._tray_id)
+                if align_result.success and align_result.aligned_image is not None:
+                    working_image = align_result.aligned_image
+                    logger.info(f"Align (Full Image): {align_result.message}")
+                else:
+                    logger.warning(f"Align ไม่สำเร็จ: {align_result.message}")
+
+        elif crop_mode == "force":
+            # บังคับตัดขอบ Auto-Crop ก่อนเสมอ
+            crop_result = self.cropper.detect_and_crop(image)
             if crop_result.is_too_far:
                 return _empty_summary(crop_result.message, q=quality_result, c=crop_result)
             if crop_result.success and crop_result.cropped_image is not None:
                 working_image = crop_result.cropped_image
-                logger.info(f"Auto-Crop: {crop_result.message}")
+                logger.info(f"Force Auto-Crop: {crop_result.message}")
+            if self._ready and self._tray_id:
+                align_result = self.aligner.align(working_image, self._tray_id)
+                if align_result.success and align_result.aligned_image is not None:
+                    working_image = align_result.aligned_image
 
-        # ── Step 1: Alignment ────────────────────────────────────────────────
-        align_result = None
-
-        if self._ready and self._tray_id:
-            align_result = self.aligner.align(working_image, self._tray_id)
-            if align_result.success and align_result.aligned_image is not None:
-                working_image = align_result.aligned_image
-                logger.info(f"Align: {align_result.message}")
-            else:
-                logger.warning(f"Align ไม่สำเร็จ — ใช้ภาพ Cropped/ดิบแทน: {align_result.message}")
         else:
-            logger.warning("ScanAggregator ยังไม่ได้ setup() หรือไม่มี reference image — ใช้ภาพ Cropped/ดิบ")
+            # 🌟 SMART MODE (SIFT-First Hybrid): แนะนำเป็นอันดับ 1
+            # 1. ทดสอบ SIFT Alignment บนภาพจริงโดยตรงก่อนเสมอ (เพราะหากถ่ายได้ดี SIFT Homography จะดึงระนาบได้คมชัด 100% โดยไม่ตัดเครื่องมือทิ้ง)
+            direct_align = None
+            if self._ready and self._tray_id:
+                direct_align = self.aligner.align(image, self._tray_id)
+
+            if direct_align and direct_align.success and direct_align.match_count >= 15:
+                # SIFT บนภาพจริงผ่านฉลุย -> ใช้ภาพนี้โดยตรงทันที ไม่ต้องครอปตัดภาพ!
+                align_result = direct_align
+                working_image = direct_align.aligned_image
+                crop_result = TrayCropResult(
+                    success=True,
+                    cropped_image=image,
+                    area_ratio=1.0,
+                    is_too_far=False,
+                    message=f"จัดระนาบสำเร็จโดยตรงด้วย SIFT Homography ({direct_align.match_count} จุดตรงกัน — คมชัดสูงสุดโดยไม่ตัดขอบ)",
+                )
+                logger.info(f"SIFT-First: Direct alignment succeeded ({direct_align.match_count} matches). Bypassing cropper.")
+            else:
+                # 2. กรณี SIFT บนภาพเต็มไม่ผ่าน (เช่น ถ่ายไกลมาก ถาดเล็ก หรือฉากหลังรบกวน) -> Fallback ไปใช้ Auto-Crop เพื่อช่วยซูมหาถาด
+                logger.info("SIFT-First: Direct alignment insufficient. Triggering fallback Auto-Crop...")
+                crop_result = self.cropper.detect_and_crop(image)
+                if crop_result.is_too_far:
+                    return _empty_summary(crop_result.message, q=quality_result, c=crop_result, a=direct_align)
+
+                if crop_result.success and crop_result.cropped_image is not None:
+                    working_image = crop_result.cropped_image
+                    logger.info(f"Fallback Auto-Crop: {crop_result.message}")
+
+                # ลอง Align ซ้ำบนภาพที่ครอปแล้ว
+                if self._ready and self._tray_id:
+                    retry_align = self.aligner.align(working_image, self._tray_id)
+                    if retry_align.success and retry_align.aligned_image is not None:
+                        working_image = retry_align.aligned_image
+                        align_result = retry_align
+                        logger.info(f"Align (After Crop): {retry_align.message}")
+                    else:
+                        align_result = direct_align if (direct_align and direct_align.match_count > retry_align.match_count) else retry_align
 
         # ── Step 2–4: ตรวจแต่ละช่อง ─────────────────────────────────────────
         slot_results: list[SlotResult] = self.checker.check_all_slots(working_image, self._slots)
