@@ -95,62 +95,86 @@ class TrayBoxCropper:
                 message="ภาพไม่ถูกต้องหรือเป็นภาพว่าง",
             )
 
+        # 0. ตรวจสอบแนวภาพ: หากภาพเป็นแนวตั้ง (Height > Width) ปรับหมุนเป็นแนวนอน (Landscape) อัตโนมัติ
+        was_rotated = False
+        if image.shape[0] > image.shape[1]:
+            image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+            was_rotated = True
+            logger.info("TrayBoxCropper: ตรวจพบภาพแนวตั้ง -> ปรับหมุนเป็นแนวนอน 90° อัตโนมัติ")
+
         h_orig, w_orig = image.shape[:2]
         total_img_area = float(h_orig * w_orig)
 
-        # 1. ย่อภาพเพื่อหา Contour ได้รวดเร็วและเสถียร (max dim 600px)
+        # 1. ย่อภาพเพื่อหา Contour และขอบสี่เหลี่ยมได้อย่างรวดเร็วและเสถียร (max dim 600px)
         scale = 600.0 / max(h_orig, w_orig)
         small = cv2.resize(image, (int(w_orig * scale), int(h_orig * scale)), interpolation=cv2.INTER_AREA)
         sh, sw = small.shape[:2]
+        small_area = float(sh * sw)
 
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (7, 7), 0)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        # 2. ค้นหาโฟมดำของถาดเครื่องมือ (Dark Foam Segmentation)
-        # ถาดโฟม EVA ส่วนใหญ่มีค่าเฉลี่ย grayscale มืด (< 110)
-        # ตรวจจับด้วย Absolute dark threshold ผสมกับ percentile เพื่อความเสถียร
-        p_val = float(np.percentile(blur, self.dark_thresh_percentile))
-        thresh_val = min(115.0, max(50.0, p_val))
-        _, mask = cv2.threshold(blur, thresh_val, 255, cv2.THRESH_BINARY_INV)
+        # 2. ค้นหาขอบเขตสี่เหลี่ยมของถาดเทียบกับพื้นหลัง (Background Border & Corner Detection)
+        candidate_quads = []
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-        mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN, kernel, iterations=1)
+        # 2.1 Multi-threshold Canny Edges เพื่อจับเส้นขอบรอบนอกของถาดกับพื้นหลัง
+        for low_t, high_t in [(30, 100), (50, 150), (20, 80)]:
+            edges = cv2.Canny(blurred, low_t, high_t)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+            cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                area = cv2.contourArea(c)
+                if 0.15 * small_area <= area <= 0.98 * small_area:
+                    hull = cv2.convexHull(c)
+                    peri = cv2.arcLength(hull, True)
+                    found_4 = False
+                    for eps in [0.02, 0.03, 0.04, 0.05]:
+                        approx = cv2.approxPolyDP(hull, eps * peri, True)
+                        if len(approx) == 4 and cv2.isContourConvex(approx):
+                            pts = approx.reshape(4, 2) / scale
+                            bx_t, by_t, bw_t, bh_t = cv2.boundingRect(hull)
+                            solidity = area / float(max(1, bw_t * bh_t))
+                            candidate_quads.append((area * 1.2 * solidity, pts, c))
+                            found_4 = True
+                            break
+                    if not found_4:
+                        rect = cv2.minAreaRect(hull)
+                        box = cv2.boxPoints(rect) / scale
+                        candidate_quads.append((area * 0.95, box, c))
 
-        # ค้นหา Contour ที่ใหญ่ที่สุด
-        contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        best_cnt = None
-        max_area = 0.0
+        # 2.2 Otsu & Inverse Otsu Thresholding เพื่อแยกพื้นหลังออกจากตัวถาด
+        _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        for mask in [otsu, cv2.bitwise_not(otsu)]:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+            mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            cnts, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                area = cv2.contourArea(c)
+                if 0.15 * small_area <= area <= 0.98 * small_area:
+                    hull = cv2.convexHull(c)
+                    peri = cv2.arcLength(hull, True)
+                    found_4 = False
+                    for eps in [0.02, 0.03, 0.04, 0.05]:
+                        approx = cv2.approxPolyDP(hull, eps * peri, True)
+                        if len(approx) == 4 and cv2.isContourConvex(approx):
+                            pts = approx.reshape(4, 2) / scale
+                            bx_t, by_t, bw_t, bh_t = cv2.boundingRect(hull)
+                            solidity = area / float(max(1, bw_t * bh_t))
+                            candidate_quads.append((area * 1.15 * solidity, pts, c))
+                            found_4 = True
+                            break
+                    if not found_4:
+                        rect = cv2.minAreaRect(hull)
+                        box = cv2.boxPoints(rect) / scale
+                        candidate_quads.append((area * 0.90, box, c))
 
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area > 0.10 * (sw * sh) and area > max_area:
-                # ตรวจสอบว่าทรงใกล้เคียงสี่เหลี่ยม (Solidity > 0.65)
-                bx_t, by_t, bw_t, bh_t = cv2.boundingRect(cnt)
-                solidity = area / float(max(1, bw_t * bh_t))
-                if solidity > 0.60:
-                    max_area = area
-                    best_cnt = cnt
-
-        # 3. Fallback: ถ้าไม่เจอด้วย Dark Threshold ให้ลองใช้ Canny Edge Contours
-        if best_cnt is None:
-            edges = cv2.Canny(blur, 40, 120)
-            edges_dil = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)))
-            cnts2, _ = cv2.findContours(edges_dil, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in cnts2:
-                area = cv2.contourArea(cnt)
-                if area > 0.15 * (sw * sh) and area > max_area:
-                    max_area = area
-                    best_cnt = cnt
-
-        # 4. หากยังไม่พบขอบถาดที่ชัดเจน (อาจเพราะผู้ใช้ถ่ายเต็มจอพอดีขอบภาพอยู่แล้ว)
-        if best_cnt is None:
-            # ใช้ภาพทั้งภาพ ถือว่าถาดเต็มจอ 100%
+        # 3. เลือกสี่เหลี่ยมมุมถาดที่ดีที่สุด
+        if not candidate_quads:
             out_img = image
             if target_size is not None:
                 tw, th = target_size
-                # สลับมิติถ้าภาพกับ target_size มีทิศทางตรงกันข้าม เพื่อรักษาสัดส่วน
-                if (w_orig > h_orig and th > tw) or (h_orig > w_orig and tw > th):
+                if tw < th:
                     tw, th = th, tw
                 out_img = cv2.resize(image, (tw, th), interpolation=cv2.INTER_LANCZOS4)
             return TrayCropResult(
@@ -160,46 +184,36 @@ class TrayBoxCropper:
                 tray_bbox=(0, 0, w_orig, h_orig),
                 area_ratio=1.0,
                 is_too_far=False,
-                message="ไม่พบขอบนอกถาดแยกจากภาพ (ภาพอาจถูกถ่ายเต็มเฟรมอยู่แล้ว)",
+                message="ไม่พบขอบพื้นหลังรอบนอก (ภาพถูกถ่ายครอบคลุมเต็มเฟรมอยู่แล้ว)" + (" [ปรับเป็นแนวนอนอัตโนมัติ]" if was_rotated else ""),
             )
 
-        # สเกล contour กลับเป็นพิกเซลขนาดภาพจริง
+        candidate_quads.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_pts, best_cnt = candidate_quads[0]
+
+        # สเกล contour และคำนวณพื้นที่
         cnt_orig = (best_cnt / scale).astype(np.int32)
         bx, by, bw, bh = cv2.boundingRect(cnt_orig)
         tray_area = float(cv2.contourArea(cnt_orig))
         area_ratio = tray_area / total_img_area
 
-        # ตรวจสอบว่าถ่ายไกลเกินไปหรือไม่
+        # จัดลำดับ 4 มุม: TL, TR, BR, BL
+        ordered_pts = order_points(np.array(best_pts, dtype="float32"))
+
+        # ตรวจสอบระยะถ่ายภาพ
         is_too_far = area_ratio < self.min_tray_ratio
 
-        # หากถาดกินพื้นที่ >= 70% ของภาพอยู่แล้ว ถือว่าถ่ายได้ระยะดีเยี่ยมเต็มเฟรม ไม่ต้องครอปตัดภาพ
-        if area_ratio >= 0.70:
+        # หากถาดกินพื้นที่ >= 75% ของภาพอยู่แล้ว ถือว่าระยะดีเยี่ยม ไม่ต้องตัดขอบ
+        if area_ratio >= 0.75:
             return TrayCropResult(
                 success=True,
                 cropped_image=image,
-                corners=np.array([[0, 0], [w_orig, 0], [w_orig, h_orig], [0, h_orig]], dtype="float32"),
-                tray_bbox=(0, 0, w_orig, h_orig),
+                corners=ordered_pts,
+                tray_bbox=(bx, by, bw, bh),
                 area_ratio=area_ratio,
                 is_too_far=False,
-                message=f"ภาพถ่ายเต็มเฟรมดีเยี่ยม (ถาดกินพื้นที่ {area_ratio:.0%} ของภาพ) — ใช้งานภาพต้นฉบับคมชัดสูงสุดโดยไม่ต้องตัดขอบ",
+                message=f"ภาพถ่ายเต็มเฟรมดีเยี่ยม (ถาดกินพื้นที่ {area_ratio:.0%} ของภาพ) — ใช้งานภาพคมชัดสูงสุด" + (" [ปรับเป็นแนวนอนอัตโนมัติ]" if was_rotated else ""),
             )
 
-        # 5. สกัดจุด 4 มุมของถาด (4-Corner Detection)
-        peri = cv2.arcLength(cnt_orig, True)
-        approx = cv2.approxPolyDP(cnt_orig, 0.03 * peri, True)
-
-        if len(approx) == 4:
-            pts_4 = approx.reshape(4, 2).astype("float32")
-        else:
-            # ถ้า approx ไม่ได้ 4 จุดพอดี ให้ใช้ minAreaRect คำนวณ 4 จุดมุม
-            rect = cv2.minAreaRect(cnt_orig)
-            box_pts = cv2.boxPoints(rect)
-            pts_4 = np.array(box_pts, dtype="float32")
-
-        # จัดลำดับจุด: TL, TR, BR, BL
-        ordered_pts = order_points(pts_4)
-
-        # 6. ถ้าถ่ายไกลเกินเกณฑ์ที่กำหนด ให้ส่งผลแจ้งเตือน
         if is_too_far:
             return TrayCropResult(
                 success=False,
@@ -211,15 +225,15 @@ class TrayBoxCropper:
                 message=f"ถ่ายภาพไกลเกินไป: ถาดมีขนาดเพียง {area_ratio:.0%} ของภาพ (เกณฑ์ขั้นต่ำ {self.min_tray_ratio:.0%}) กรุณาขยับกล้องเข้าใกล้ถาดมากขึ้น",
             )
 
-        # 6.5 Safe Padding: ขยายขอบปลอดภัย 8% ออกไปรอบทิศทาง เพื่อป้องกันไม่ให้ตัดโดนเครื่องมือริมขอบ
+        # 4. Safe Padding: ขยายขอบปลอดภัย 6% ออกไปรอบทิศทาง เพื่อป้องกันไม่ให้ตัดโดนเครื่องมือริมขอบ
         centroid = np.mean(ordered_pts, axis=0)
-        expand_ratio = 1.08
+        expand_ratio = 1.06
         expanded_pts = centroid + (ordered_pts - centroid) * expand_ratio
         expanded_pts[:, 0] = np.clip(expanded_pts[:, 0], 0, w_orig - 1)
         expanded_pts[:, 1] = np.clip(expanded_pts[:, 1], 0, h_orig - 1)
         ordered_pts = expanded_pts
 
-        # 7. ทำ Perspective Warp
+        # 5. ทำ Perspective Warp
         tl, tr, br, bl = ordered_pts
         width_a = np.linalg.norm(br - bl)
         width_b = np.linalg.norm(tr - tl)
@@ -229,14 +243,15 @@ class TrayBoxCropper:
         height_b = np.linalg.norm(tl - bl)
         calc_h = int(max(height_a, height_b))
 
+        # รับประกันว่ามิติผลลัพธ์เป็นแนวนอนเสมอ (Landscape: width >= height)
+        if calc_w < calc_h:
+            calc_w, calc_h = calc_h, calc_w
+
         if target_size is not None:
             tw, th = target_size
-            # ถ้ากล่องถาดเป็นแนวตั้ง (calc_h > calc_w) แต่ target_size เป็นแนวนอน (tw > th)
-            # ให้สลับมิติเพื่อคงสัดส่วนที่ถูกต้อง ป้องกัน SIFT keypoints ผิดรูป
-            if (calc_h > calc_w and tw > th) or (calc_w > calc_h and th > tw):
-                dst_w, dst_h = th, tw
-            else:
-                dst_w, dst_h = tw, th
+            if tw < th:
+                tw, th = th, tw
+            dst_w, dst_h = tw, th
         else:
             dst_w, dst_h = calc_w, calc_h
 
@@ -247,7 +262,6 @@ class TrayBoxCropper:
             [0, dst_h - 1],
         ], dtype="float32")
 
-        # ตรวจสอบความถูกต้องของ Homography Matrix
         try:
             M = cv2.getPerspectiveTransform(ordered_pts, dst_pts)
             warped = cv2.warpPerspective(
@@ -257,20 +271,27 @@ class TrayBoxCropper:
             )
         except Exception as e:
             logger.warning(f"Perspective Transform failed: {e}, falling back to bounding box crop")
-            # Fallback: ตัดตาม Bounding Box พร้อม margin 2%
-            mx = int(bw * 0.02)
-            my = int(bh * 0.02)
+            mx = int(bw * 0.03)
+            my = int(bh * 0.03)
             crop_x1 = max(0, bx - mx)
             crop_y1 = max(0, by - my)
             crop_x2 = min(w_orig, bx + bw + mx)
             crop_y2 = min(h_orig, by + bh + my)
             cropped = image[crop_y1:crop_y2, crop_x1:crop_x2]
             if target_size is not None:
-                warped = cv2.resize(cropped, target_size, interpolation=cv2.INTER_LANCZOS4)
+                tw, th = target_size
+                if tw < th:
+                    tw, th = th, tw
+                warped = cv2.resize(cropped, (tw, th), interpolation=cv2.INTER_LANCZOS4)
             else:
                 warped = cropped
 
-        msg = f"ตรวจพบถาดและตัดขอบสำเร็จ (พื้นที่ถาด {area_ratio:.0%})"
+        # รับประกันผลลัพธ์สุดท้ายเป็นแนวนอนเสมอ
+        if warped.shape[0] > warped.shape[1]:
+            warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+
+        rot_note = " [ปรับเป็นแนวนอนอัตโนมัติ]" if was_rotated else ""
+        msg = f"จับมุมขอบสี่เหลี่ยมถาดและตัดขอบสำเร็จ (พื้นที่ถาด {area_ratio:.0%}){rot_note}"
         if area_ratio < self.optimal_tray_ratio:
             msg += f" (แนะนำ: ขยับกล้องเข้าใกล้ขึ้นอีกเล็กน้อยเพื่อให้ได้ {self.optimal_tray_ratio:.0%}+)"
 

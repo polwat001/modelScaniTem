@@ -378,6 +378,11 @@ class SlotChecker:
         img_w, img_h = img_size
         detail: dict[str, Any] = {}
 
+        if sh < 5 or sw < 5 or slot_gray.size == 0:
+            detail["reason"] = "ขนาดช่องเล็กเกินไปสำหรับตรวจรูปทรง"
+            detail["iou"] = 0.0
+            return "uncertain", 0.50, detail
+
         # ตรวจความคล้ายกับ reference tool
         sim_score = 0.0
         if ref_crop is not None and ref_crop.size > 0:

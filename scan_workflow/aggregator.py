@@ -234,7 +234,14 @@ class ScanAggregator:
                 error_message=msg,
             )
 
-        # ── Step 0: Quality Gate ─────────────────────────────────────────────
+        # ── Step 0: Auto-Rotate to Landscape if Portrait ────────────────────
+        was_portrait = False
+        if image is not None and image.shape[0] > image.shape[1]:
+            image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+            was_portrait = True
+            logger.info(f"ScanAggregator: ตรวจพบภาพแนวตั้ง ({image.shape[1]}x{image.shape[0]}) -> ปรับหมุนเป็นแนวนอน 90° อัตโนมัติ")
+
+        # ── Step 0.2: Quality Gate ──────────────────────────────────────────
         quality_result = None
         if not skip_quality:
             quality_result = self.quality_gate.check(image)
