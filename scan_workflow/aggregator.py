@@ -286,43 +286,57 @@ class ScanAggregator:
 
         else:
             # 🌟 SMART MODE (SIFT-First Hybrid): แนะนำเป็นอันดับ 1
-            # 1. ทดสอบ SIFT Alignment บนภาพจริงโดยตรงก่อนเสมอ (เพราะหากถ่ายได้ดี SIFT Homography จะดึงระนาบได้คมชัด 100% โดยไม่ตัดเครื่องมือทิ้ง)
-            direct_align = None
-            if self._ready and self._tray_id:
-                direct_align = self.aligner.align(image, self._tray_id)
-
-            if direct_align and direct_align.success and direct_align.match_count >= 15:
-                # SIFT บนภาพจริงผ่านฉลุย -> ใช้ภาพนี้โดยตรงทันที ไม่ต้องครอปตัดภาพ!
-                align_result = direct_align
-                working_image = direct_align.aligned_image
-                crop_result = TrayCropResult(
-                    success=True,
-                    cropped_image=image,
-                    area_ratio=1.0,
-                    is_too_far=False,
-                    message=f"จัดระนาบสำเร็จโดยตรงด้วย SIFT Homography ({direct_align.match_count} จุดตรงกัน — คมชัดสูงสุดโดยไม่ตัดขอบ)",
-                )
-                logger.info(f"SIFT-First: Direct alignment succeeded ({direct_align.match_count} matches). Bypassing cropper.")
-            else:
-                # 2. กรณี SIFT บนภาพเต็มไม่ผ่าน (เช่น ถ่ายไกลมาก ถาดเล็ก หรือฉากหลังรบกวน) -> Fallback ไปใช้ Auto-Crop เพื่อช่วยซูมหาถาด
-                logger.info("SIFT-First: Direct alignment insufficient. Triggering fallback Auto-Crop...")
+            # 1. กรณีภาพถ่ายในตู้/ลิ้นชักสีแดง (Red Chest Enclosure):
+            # มีขอบตู้เหล็กและรางข้าง (เช่น ปืนลม DG-10, เหล็กงัด) ที่ไม่ใช่ส่วนของถาด
+            # ให้ตัดขอบตู้และแยกเฉพาะถาดโฟมดำทันทีก่อนจัดระนาบ เพื่อให้ระนาบแม่นยำสูงสุด
+            if self.cropper.is_red_chest_enclosure(image):
+                logger.info("SIFT-First: ตรวจพบภาพในตู้/ลิ้นชักสีแดง -> แยกถาดโฟมดำและตัดสิ่งแปลกปลอมในรางข้างออกโดยอัตโนมัติ")
                 crop_result = self.cropper.detect_and_crop(image)
                 if crop_result.is_too_far:
-                    return _empty_summary(crop_result.message, q=quality_result, c=crop_result, a=direct_align)
-
+                    return _empty_summary(crop_result.message, q=quality_result, c=crop_result)
                 if crop_result.success and crop_result.cropped_image is not None:
                     working_image = crop_result.cropped_image
-                    logger.info(f"Fallback Auto-Crop: {crop_result.message}")
-
-                # ลอง Align ซ้ำบนภาพที่ครอปแล้ว
                 if self._ready and self._tray_id:
-                    retry_align = self.aligner.align(working_image, self._tray_id)
-                    if retry_align.success and retry_align.aligned_image is not None:
-                        working_image = retry_align.aligned_image
-                        align_result = retry_align
-                        logger.info(f"Align (After Crop): {retry_align.message}")
-                    else:
-                        align_result = direct_align if (direct_align and direct_align.match_count > retry_align.match_count) else retry_align
+                    align_result = self.aligner.align(working_image, self._tray_id)
+                    if align_result.success and align_result.aligned_image is not None:
+                        working_image = align_result.aligned_image
+            else:
+                # 2. กรณีถาดทั่วไปบนโต๊ะ: ทดสอบ SIFT Alignment บนภาพจริงโดยตรงก่อน
+                direct_align = None
+                if self._ready and self._tray_id:
+                    direct_align = self.aligner.align(image, self._tray_id)
+
+                if direct_align and direct_align.success and direct_align.match_count >= 15:
+                    align_result = direct_align
+                    working_image = direct_align.aligned_image
+                    crop_result = TrayCropResult(
+                        success=True,
+                        cropped_image=image,
+                        area_ratio=1.0,
+                        is_too_far=False,
+                        message=f"จัดระนาบสำเร็จโดยตรงด้วย SIFT Homography ({direct_align.match_count} จุดตรงกัน — คมชัดสูงสุดโดยไม่ตัดขอบ)",
+                    )
+                    logger.info(f"SIFT-First: Direct alignment succeeded ({direct_align.match_count} matches). Bypassing cropper.")
+                else:
+                    # กรณี SIFT บนภาพเต็มไม่ผ่าน (เช่น ถ่ายไกลมาก ถาดเล็ก หรือฉากหลังรบกวน) -> Fallback ไปใช้ Auto-Crop เพื่อช่วยซูมหาถาด
+                    logger.info("SIFT-First: Direct alignment insufficient. Triggering fallback Auto-Crop...")
+                    crop_result = self.cropper.detect_and_crop(image)
+                    if crop_result.is_too_far:
+                        return _empty_summary(crop_result.message, q=quality_result, c=crop_result, a=direct_align)
+
+                    if crop_result.success and crop_result.cropped_image is not None:
+                        working_image = crop_result.cropped_image
+                        logger.info(f"Fallback Auto-Crop: {crop_result.message}")
+
+                    # ลอง Align ซ้ำบนภาพที่ครอปแล้ว
+                    if self._ready and self._tray_id:
+                        retry_align = self.aligner.align(working_image, self._tray_id)
+                        if retry_align.success and retry_align.aligned_image is not None:
+                            working_image = retry_align.aligned_image
+                            align_result = retry_align
+                            logger.info(f"Align (After Crop): {retry_align.message}")
+                        else:
+                            align_result = direct_align if (direct_align and direct_align.match_count > retry_align.match_count) else retry_align
 
         # ── Step 2–4: ตรวจแต่ละช่อง ─────────────────────────────────────────
         slot_results: list[SlotResult] = self.checker.check_all_slots(working_image, self._slots)

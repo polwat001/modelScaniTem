@@ -69,6 +69,26 @@ class TrayBoxCropper:
         self.optimal_tray_ratio = optimal_tray_ratio
         self.dark_thresh_percentile = dark_thresh_percentile
 
+    @staticmethod
+    def is_red_chest_enclosure(image: np.ndarray) -> bool:
+        """ตรวจสอบว่าภาพถ่ายมีขอบเขตตู้หรือลิ้นชักเครื่องมือสีแดงล้อมรอบหรือไม่"""
+        if image is None or image.size == 0:
+            return False
+        h, w = image.shape[:2]
+        total = float(h * w)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        m1 = cv2.inRange(hsv, np.array([0, 45, 35]), np.array([16, 255, 255]))
+        m2 = cv2.inRange(hsv, np.array([162, 45, 35]), np.array([180, 255, 255]))
+        red_mask = cv2.bitwise_or(m1, m2)
+
+        red_ratio = np.sum(red_mask > 0) / total
+        top_r = np.sum(red_mask[:int(0.12 * h), :] > 0) / (0.12 * total)
+        bot_r = np.sum(red_mask[int(0.88 * h):, :] > 0) / (0.12 * total)
+        left_r = np.sum(red_mask[:, :int(0.12 * w)] > 0) / (0.12 * total)
+        right_r = np.sum(red_mask[:, int(0.88 * w):] > 0) / (0.12 * total)
+        border_sum = top_r + bot_r + left_r + right_r
+        return (red_ratio >= 0.12 and border_sum >= 0.45) or (red_ratio >= 0.22)
+
     def detect_and_crop(
         self,
         image: np.ndarray,
@@ -105,7 +125,118 @@ class TrayBoxCropper:
         h_orig, w_orig = image.shape[:2]
         total_img_area = float(h_orig * w_orig)
 
-        # 1. ย่อภาพเพื่อหา Contour และขอบสี่เหลี่ยมได้อย่างรวดเร็วและเสถียร (max dim 600px)
+        # 1. การตรวจจับถาดโฟมดำในตู้/ลิ้นชักสีแดง (Red Chest / Cabinet & Black Foam Isolation)
+        # ตัดขอบตู้เหล็กสีแดง ก้นลิ้นชัก และวัตถุแปลกปลอมในรางข้าง (เช่น ปืนลม DG-10, เหล็กงัด) ออกโดยอัตโนมัติ
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        m1 = cv2.inRange(hsv, np.array([0, 45, 35]), np.array([16, 255, 255]))
+        m2 = cv2.inRange(hsv, np.array([162, 45, 35]), np.array([180, 255, 255]))
+        red_mask = cv2.bitwise_or(m1, m2)
+
+        red_ratio = np.sum(red_mask > 0) / total_img_area
+        top_r = np.sum(red_mask[:int(0.12 * h_orig), :] > 0) / (0.12 * total_img_area)
+        bot_r = np.sum(red_mask[int(0.88 * h_orig):, :] > 0) / (0.12 * total_img_area)
+        left_r = np.sum(red_mask[:, :int(0.12 * w_orig)] > 0) / (0.12 * total_img_area)
+        right_r = np.sum(red_mask[:, int(0.88 * w_orig):] > 0) / (0.12 * total_img_area)
+        border_sum = top_r + bot_r + left_r + right_r
+
+        is_red_chest = (red_ratio >= 0.12 and border_sum >= 0.45) or (red_ratio >= 0.22)
+
+        if is_red_chest:
+            k_size = max(15, int(min(h_orig, w_orig) * 0.03))
+            if k_size % 2 == 0:
+                k_size += 1
+            k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
+            red_closed = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, k_close, iterations=2)
+
+            cnts, hier = cv2.findContours(red_closed, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+            if hier is not None and len(hier) > 0:
+                hier = hier[0]
+                holes = []
+                for i, c in enumerate(cnts):
+                    if hier[i][3] != -1:  # โพรงด้านในกรอบสีแดง (Inner cavity inside red frame)
+                        area = cv2.contourArea(c)
+                        if area >= 0.10 * total_img_area:
+                            bx, by, bw, bh = cv2.boundingRect(c)
+                            cx, cy = bx + bw / 2.0, by + bh / 2.0
+                            dist = np.hypot(cx - w_orig / 2.0, cy - h_orig / 2.0) / np.hypot(w_orig / 2.0, h_orig / 2.0)
+                            score = area * (1.0 - 0.4 * dist)
+                            holes.append((score, bx, by, bw, bh))
+                if holes:
+                    holes.sort(key=lambda x: x[0], reverse=True)
+                    _, hx, hy, hw, hh = holes[0]
+
+                    # กำจัดรางสีแดงด้านข้าง (เช่น ปืนลม DG-10 ด้านซ้าย หรือเหล็กงัดด้านขวา)
+                    hole_hsv = hsv[hy:hy + hh, hx:hx + hw]
+                    hm1 = cv2.inRange(hole_hsv, np.array([0, 45, 35]), np.array([16, 255, 255]))
+                    hm2 = cv2.inRange(hole_hsv, np.array([162, 45, 35]), np.array([180, 255, 255]))
+                    h_red = cv2.bitwise_or(hm1, hm2)
+
+                    col_r = np.sum(h_red > 0, axis=0) / float(hh)
+                    row_r = np.sum(h_red > 0, axis=1) / float(hw)
+
+                    valid_cols = np.where(col_r <= 0.22)[0]
+                    valid_rows = np.where(row_r <= 0.25)[0]
+
+                    if len(valid_cols) > 0 and len(valid_rows) > 0:
+                        pad_x = int(hw * 0.035)  # 3.5% safe margin
+                        pad_y = int(hh * 0.035)
+                        fx1 = max(0, int(valid_cols[0]) - pad_x)
+                        fx2 = min(hw, int(valid_cols[-1]) + pad_x)
+                        fy1 = max(0, int(valid_rows[0]) - pad_y)
+                        fy2 = min(hh, int(valid_rows[-1]) + pad_y)
+
+                        final_x = int(hx + fx1)
+                        final_y = int(hy + fy1)
+                        final_w = int(fx2 - fx1)
+                        final_h = int(fy2 - fy1)
+                    else:
+                        final_x, final_y, final_w, final_h = int(hx), int(hy), int(hw), int(hh)
+
+                    tray_area = float(final_w * final_h)
+                    area_ratio = tray_area / total_img_area
+                    is_too_far = area_ratio < self.min_tray_ratio
+
+                    ordered_pts = np.array([
+                        [final_x, final_y],
+                        [final_x + final_w, final_y],
+                        [final_x + final_w, final_y + final_h],
+                        [final_x, final_y + final_h]
+                    ], dtype="float32")
+
+                    if is_too_far:
+                        return TrayCropResult(
+                            success=False,
+                            cropped_image=None,
+                            corners=ordered_pts,
+                            tray_bbox=(final_x, final_y, final_w, final_h),
+                            area_ratio=area_ratio,
+                            is_too_far=True,
+                            message=f"ถ่ายภาพไกลเกินไป: ถาดมีขนาดเพียง {area_ratio:.0%} ของภาพ (เกณฑ์ขั้นต่ำ {self.min_tray_ratio:.0%}) กรุณาขยับกล้องเข้าใกล้ถาดมากขึ้น",
+                        )
+
+                    crop_img = image[final_y:final_y + final_h, final_x:final_x + final_w]
+                    if target_size is not None:
+                        tw, th = target_size
+                        if tw < th:
+                            tw, th = th, tw
+                        crop_img = cv2.resize(crop_img, (tw, th), interpolation=cv2.INTER_LANCZOS4)
+
+                    if crop_img.shape[0] > crop_img.shape[1]:
+                        crop_img = cv2.rotate(crop_img, cv2.ROTATE_90_CLOCKWISE)
+
+                    rot_note = " [ปรับเป็นแนวนอนอัตโนมัติ]" if was_rotated else ""
+                    logger.info(f"TrayBoxCropper: ตรวจพบถาดในตู้/ลิ้นชักสีแดง -> ตัดขอบแม่นยำ x={final_x}, y={final_y}, w={final_w}, h={final_h} (พื้นที่ {area_ratio:.0%})")
+                    return TrayCropResult(
+                        success=True,
+                        cropped_image=crop_img,
+                        corners=ordered_pts,
+                        tray_bbox=(final_x, final_y, final_w, final_h),
+                        area_ratio=area_ratio,
+                        is_too_far=False,
+                        message=f"ตรวจจับถาดโฟมดำและตัดขอบตู้/ลิ้นชักสีแดงสำเร็จ (พื้นที่ถาด {area_ratio:.0%}){rot_note}",
+                    )
+
+        # 2. ย่อภาพเพื่อหา Contour และขอบสี่เหลี่ยมได้อย่างรวดเร็วและเสถียร (กรณีถาดตั้งบนโต๊ะ/พื้นหลังทั่วไป)
         scale = 600.0 / max(h_orig, w_orig)
         small = cv2.resize(image, (int(w_orig * scale), int(h_orig * scale)), interpolation=cv2.INTER_AREA)
         sh, sw = small.shape[:2]

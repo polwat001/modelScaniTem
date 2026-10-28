@@ -10,17 +10,17 @@
       "misplaced": 0,
       "recheck": 0,
       "pct": 100.0,
-      "time_sec": 0.96
+      "time_sec": 1.08
     },
     "portrait": {
       "matches": 10950,
-      "rotation": 90,
+      "rotation": 0,
       "correct": 69,
       "missing": 0,
       "misplaced": 0,
       "recheck": 0,
       "pct": 100.0,
-      "time_sec": 0.88
+      "time_sec": 0.98
     }
   },
   {
@@ -34,17 +34,17 @@
       "misplaced": 0,
       "recheck": 0,
       "pct": 100.0,
-      "time_sec": 5.23
+      "time_sec": 5.21
     },
     "portrait": {
       "matches": 36478,
-      "rotation": 90,
+      "rotation": 0,
       "correct": 17,
       "missing": 0,
       "misplaced": 0,
       "recheck": 0,
       "pct": 100.0,
-      "time_sec": 4.81
+      "time_sec": 4.83
     }
   },
   {
@@ -58,17 +58,17 @@
       "misplaced": 0,
       "recheck": 0,
       "pct": 100.0,
-      "time_sec": 2.18
+      "time_sec": 2.66
     },
     "portrait": {
       "matches": 9429,
-      "rotation": 90,
+      "rotation": 0,
       "correct": 41,
       "missing": 0,
       "misplaced": 0,
       "recheck": 0,
       "pct": 100.0,
-      "time_sec": 2.22
+      "time_sec": 2.41
     }
   }
 ]
